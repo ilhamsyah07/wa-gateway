@@ -366,6 +366,13 @@ async def startup():
         )
     logger.info("API key migration to hashed storage complete")
 
+    if USE_REAL_BAILEYS and not BAILEYS_TOKEN:
+        logger.warning(
+            "SECURITY: BAILEYS_URL is set but BAILEYS_TOKEN is empty — "
+            "/api/webhook/baileys is unauthenticated and can be spoofed. "
+            "Set BAILEYS_TOKEN in both backend and baileys-service envs."
+        )
+
 @app.on_event("shutdown")
 async def shutdown():
     client.close()

@@ -3,54 +3,42 @@
 ## Original Problem Statement
 "bisakah anda membantu gua untuk membuat wa gateway"
 
-## User Choices
-- WhatsApp library: Baileys (Note: Node-only — implemented as faithful MOCK on Python stack)
-- Features: All (single send, broadcast, media, auto-reply, REST API, history, QR scan)
-- Auth: JWT email/password + Emergent-managed Google OAuth with admin approval flow
-- Multi-session per user: yes
-- Design: Modern dashboard (Swiss/High-contrast, Vercel/Linear inspired)
-- i18n: Indonesian (default) + English with live switcher
-
 ## Architecture
-- React (frontend, port 3000) + FastAPI (port 8001) + MongoDB
-- JWT bearer auth (24h expiry, type='access' claim validated, iat included)
-- X-API-Key (sha256-hashed at rest) for public REST API
-- Rate limiting via slowapi (XFF-aware key_func)
-- CORS allowlist via CORS_ORIGINS env
-- WhatsApp behavior is **MOCKED** (real QR PNG; status auto-transitions to "connected" ~20s after creation; ~92% send success)
+- React (frontend) + FastAPI (backend) + MongoDB
+- Optional Node.js Baileys microservice (real WA) via `BAILEYS_URL` env switch
+- Optional Resend (email) via `RESEND_API_KEY` env
+- Optional Emergent-managed Google OAuth alongside JWT email/password auth
+- i18n Indonesian (default) + English with live switcher
+- Containerized with docker-compose for VPS deploy + Nginx + SSL
 
 ## Iterations
-### Iteration 1 (Feb 2026) — MVP
-- Email/password auth, sessions+QR, send/broadcast/auto-reply/history/api-keys/api-docs UI
-- 16/16 backend tests passing
+### Iteration 1 (Feb 2026) — MVP (mocked Baileys)
+- Email/password auth, sessions+QR, send/broadcast/auto-reply/history/api-keys/api-docs
 
 ### Iteration 2 — Emergent Google Auth + Admin Approval
-- Google sign-in button; first-time Google users land in `status='pending'`
-- Admin Users page with Pending/Active/All tabs + Approve/Reject
-- `require_admin` dependency on /api/admin/* routes
-- 15/15 new tests + regression OK
+- New Google users land status='pending'; admin approves via /admin/users
 
 ### Iteration 3 — i18n (ID/EN)
-- LanguageContext + useT() hook, persisted in localStorage (wag_lang)
-- Compact ↔ full switcher; default Indonesian
-- All 10+ pages translated, zero raw keys leaking
+- LanguageContext + t() hook, compact/full switcher in sidebar/login/settings
 
-### Iteration 4 — Security Hardening Pass
-- SEC-001: admin password no longer force-reset on startup; first-boot generates random if no env
-- SEC-002: API keys sha256-hashed at rest; full key shown only once at creation; legacy plaintext keys auto-migrated on startup
-- SEC-003: SimulateInboundReq Pydantic model prevents NoSQL operator injection
-- JWT: shorter expiry (24h), `iat` claim added, `type='access'` validated on every decode
-- Rate limiting: login 5/min, register 3/min, google-session 10/min, public /v1/send 60/min (XFF-aware)
-- Broadcast cap: max 500 numbers/request
-- CORS: explicit allowlist via env (no more wildcard)
-- 46/47 tests passing (1 pre-existing flaky auto-reply test)
+### Iteration 4 — Security hardening pass
+- SEC-001: admin password no longer force-reset (random on first boot if no env)
+- SEC-002: API keys sha256-hashed at rest; full key shown once
+- SEC-003: Pydantic validation on auto-reply simulate
+- JWT iat + type='access' + 24h expiry; rate limiting; CORS allowlist; broadcast cap 500
 
-## Backlog (P1/P2)
-- Replace MOCK with real Baileys Node.js sidecar service (P1)
-- Email notifications (Resend/SendGrid) for admin approvals (P1)
-- Object-storage backed media upload (currently URL-only) (P1)
-- Webhook receiver for real inbound messages (P2)
-- Scheduled/queued message sending (P2)
-- Password reset flow (P2)
-- Docker compose + VPS deploy guide (P2)
-- Per-user usage metering + Stripe billing (P3)
+### Iteration 5 — Production-ready package
+- **Real Baileys**: Node.js microservice at /app/baileys-service/ (package.json, server.js, Dockerfile). FastAPI proxies via `BAILEYS_URL` env. Webhook `/api/webhook/baileys` for inbound + state events (X-Internal-Token auth).
+- **Resend email**: Graceful no-op when `RESEND_API_KEY` unset. Sends invitation links + admin-approval notifications.
+- **Invitation links**: Admin creates → user accepts at `/invite/{token}` → status='active' (no admin approval). Auto-revokes previous pending invites per email. Public read endpoint returns 410 for accepted/revoked/expired.
+- **VPS deployment package**: `/app/docker-compose.yml` (mongo + baileys + backend + frontend + nginx), `/app/backend/Dockerfile`, `/app/frontend/Dockerfile`, `/app/baileys-service/Dockerfile`, `/app/deploy/nginx.conf`, `/app/.env.example`, `/app/README-DEPLOY.md` (step-by-step Ubuntu guide)
+- Tests: 58/61 (3 known-flaky/rate-collision, not regressions). All 14 new invitation tests pass. Frontend 9/9 invitation flow.
+
+## Backlog
+- Email provider key collection (RESEND_API_KEY) when user opts in
+- Split server.py into routers/ submodules (now 1100+ lines)
+- Webhook receiver for inbound messages
+- Scheduled / queued messages
+- Per-user usage metering + Stripe billing
+- Password reset flow
+- Redis-backed slowapi for multi-instance deployments
