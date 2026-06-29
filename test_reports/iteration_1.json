@@ -1,0 +1,47 @@
+{
+  "summary": "First end-to-end test of WA Gateway MVP. Backend: 16/16 pytest tests pass (auth, sessions CRUD, send/broadcast, auto-reply CRUD+simulate, api-keys public REST flow, stats overview, 401s). Frontend: full SPA flows verified (login, dashboard, sessions create+QR, send, broadcast, auto-reply create, api-key generate). Found 1 CRITICAL routing bug where SPA paths /api-keys and /api-docs collide with backend ingress prefix /api*, making direct navigation/refresh return JSON 404.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "Router / Ingress",
+        "issue": "Frontend routes /api-keys and /api-docs are intercepted by the Kubernetes ingress rule that forwards any path starting with /api to backend port 8001. Direct navigation, page refresh, or opening in new tab returns `{\"detail\":\"Not Found\"}` (backend 404 JSON) instead of the React app. Only in-app SPA navigation (clicking sidebar link) works because client-side React Router handles it without a network round-trip. curl https://wa-messenger-api.preview.emergentagent.com/api-keys -> 404 application/json; same for /api-docs. /sessions, /send, /broadcast etc return 200 text/html.",
+        "selector": "route paths",
+        "priority": "CRITICAL"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Rename frontend routes /api-keys -> /keys (or /apikeys) and /api-docs -> /docs (or /apidocs) in src/App.js (or wherever <Route> is defined) plus the Sidebar nav links, so they no longer collide with the /api* ingress prefix. After rename, verify refresh/direct nav works on the new paths."
+  ],
+  "critical_code_review_comments": [
+    "Frontend route paths /api-keys and /api-docs conflict with backend /api prefix at the ingress layer — must not begin with /api.",
+    "server.py CORS middleware is added AFTER app.include_router(api_router). FastAPI middleware should be added before routes are mounted for predictable behavior; works in practice but is brittle.",
+    "simulate_qr_lifecycle uses asyncio.create_task without holding a reference — if backend reloads/restarts during 20s sleep, sessions can be left stuck in 'qr' status with no recovery mechanism (regenerate-qr is the only way out).",
+    "_process_send raises HTTPException 400 when session not connected; in broadcast loop this is caught but per-recipient errors are coerced to 'failed' with the same detail — fine, but consider distinguishing infra vs delivery failures.",
+    "PATCH /auto-replies/{rule_id} uses AutoReplyRuleReq which requires `keyword` and `reply` — true partial updates are not possible. Consider a separate optional-fields model for PATCH.",
+    "X-API-Key lookup hits Mongo on every request; consider an in-memory cache for high-throughput scenarios (not blocking for MVP)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (16/16 pytest)",
+    "frontend": "~90% (all flows work via SPA nav; /api-keys & /api-docs broken on direct nav/refresh)"
+  },
+  "test_credentials": "admin@wagateway.com / admin123 (seeded). Verified working.",
+  "seed_data_creation": "Each test that needs a 'connected' session creates a fresh session via POST /api/sessions and directly flips status=connected via mongosh to bypass the 20s mocked Baileys lifecycle. Test data prefixed with TEST_ / E2E_ for easy identification. Test sessions are deleted after the test class via fixture teardown / explicit cleanup.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend regression suite at /app/backend/tests/backend_test.py covers all critical APIs and uses MongoDB to deterministically connect a session. Frontend testids that matter: login-email-input, login-password-input, login-submit-button, add-session-button, session-name-input/create-session-submit (in the New session dialog — confirm in code), session-select, to-input, message-input, send-button, broadcast-session-select, numbers-textarea, broadcast-message-input, broadcast-send-button, add-rule-button, rule-keyword-input, rule-reply-input, create-rule-submit, simulate-button, sim-session-select, sim-text-input, run-simulate-button, add-api-key-button, api-key-label-input, api-key-create-submit, new-api-key-value. After main agent renames /api-keys and /api-docs routes, re-run curl on the new paths and verify text/html 200 + that sidebar nav-api-keys / nav-api-docs links still point to the new paths.",
+  "rca of the issue": "The Kubernetes ingress is configured to route every request whose path starts with /api to backend service on port 8001 (per environment notes). The React app declared client-side routes /api-keys and /api-docs that both match this /api* prefix at the ingress layer, so the request never reaches the frontend container — backend FastAPI receives GET /api-keys, has no handler at that exact path (its handlers live under /api/api-keys), and returns its own 404 JSON. Mitigation: rename the frontend route paths to something that does NOT start with /api (e.g. /keys, /docs, /apikeys, /apidocs) and update the corresponding <Link> hrefs in the sidebar. No backend change required."
+}
