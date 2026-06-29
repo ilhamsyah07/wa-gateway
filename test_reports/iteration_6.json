@@ -1,0 +1,58 @@
+{
+  "summary": "Iteration 6 verifies the .gitignore-only fix. Confirmed `.env.example` is no longer git-ignored (negation rule on line 86 active, `git check-ignore` exits 1). Ran a narrow smoke suite covering the 5 critical backend endpoints + health, and verified the login page renders in Indonesian by default with a working ID/EN switcher. All 6 backend smoke tests pass; frontend login page renders cleanly with no console errors. Gitignore fix is inert as expected.",
+  "gitignore_verification": {
+    "file_exists_on_disk": true,
+    "git_check_ignore_exit_code": 1,
+    "git_check_ignore_v_output": ".gitignore:86:!.env.example\t.env.example",
+    "interpretation": "Exit 1 from `git check-ignore` confirms file is NOT ignored. -v output shows the negation rule on line 86 is what was matched, overriding the .env.* glob block (line 84). Future `git add .env.example` will succeed.",
+    "note": "File is currently untracked in the local working copy (not yet `git add`ed), which is expected — main agent / user must commit & push it."
+  },
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "backend_smoke_results": {
+    "health_GET_/api/": "PASS (200)",
+    "login_POST_/api/auth/login": "PASS — JWT returned (access_token)",
+    "GET_/api/sessions": "PASS (200, with bearer token)",
+    "POST_/api/api-keys": "PASS (created with `label` field; 200/201)",
+    "GET_/api/admin/users": "PASS (200)",
+    "POST_/api/admin/invitations": "PASS (created with email+role)"
+  },
+  "frontend_smoke_results": {
+    "login_page_loads": true,
+    "default_language": "Indonesian (Selamat datang kembali, Kata Sandi, Masuk)",
+    "language_switcher_works": true,
+    "after_EN_click": "English UI confirmed (Welcome back, Password, Sign in)",
+    "console_errors": "none",
+    "visible_error_elements": "none"
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_gitignore_smoke.py",
+    "/app/test_reports/pytest/iteration_6_smoke.xml"
+  ],
+  "action_items": [
+    "None for code. Main agent / user should now `git add .env.example && git commit -m 'chore: include .env.example template' && git push` so the template ships to the VPS on next `git clone` / `git pull`."
+  ],
+  "critical_code_review_comments": [
+    "Smoke test note: POST /api/api-keys schema requires `label` (not `name`). Worth documenting in API docs / OpenAPI examples for API consumers."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_gitignore_smoke.py (new — smoke regression for future iterations)"
+  ],
+  "success_rate": {
+    "backend": "100% (6/6 smoke tests)",
+    "frontend": "100% (login render + i18n switcher)"
+  },
+  "test_credentials": "admin@wagateway.com / admin123 (from review request; matches login page demo credentials box)",
+  "seed_data_creation": "None. Test API key and invitation created with TEST_ prefix; API key cleaned up in-test.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 6 was a .gitignore-only fix verification. Backend & frontend untouched. Iteration 5 baseline (58/61 backend, 9/9 invitation flow) still holds. New smoke file at /app/backend/tests/test_gitignore_smoke.py is reusable for quick regression. Next iterations can skip re-verifying the gitignore unless that file is touched again.",
+  "rca of the issue": "Original RCA was correct: `.gitignore` line 84 `.env.*` glob excluded `.env.example` from `git add`, so VPS `git clone` never received the template. Fix added `!.env.example` (line 86) and `!.env.sample` (line 87) negation rules. Verified with `git check-ignore .env.example` returning exit 1 (= not ignored). Mitigation: main agent should `git add .env.example && git commit && git push` to deliver the template to the remote, then user's next `git pull` on the VPS will receive it."
+}
