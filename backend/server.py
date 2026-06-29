@@ -40,7 +40,7 @@ JWT_EXPIRE_HOURS = int(os.environ.get("JWT_EXPIRE_HOURS", "24"))
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
-limiter = Limiter(key_func=get_remote_address, default_limits=[])
+limiter = Limiter(key_func=lambda request: (request.headers.get("x-forwarded-for", "").split(",")[0].strip() or get_remote_address(request)), default_limits=[])
 
 app = FastAPI(title="WA Gateway API", version="1.0.0")
 app.state.limiter = limiter
@@ -70,10 +70,12 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 def create_access_token(user_id: str, email: str) -> str:
+    now = datetime.now(timezone.utc)
     payload = {
         "sub": user_id,
         "email": email,
-        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRE_HOURS),
+        "iat": now,
+        "exp": now + timedelta(hours=JWT_EXPIRE_HOURS),
         "type": "access",
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
