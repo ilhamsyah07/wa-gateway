@@ -35,9 +35,18 @@ def mongo():
 
 @pytest.fixture(scope="module")
 def admin_headers():
-    r = requests.post(f"{API}/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}, timeout=20)
-    assert r.status_code == 200, f"Admin login failed: {r.text}"
-    return {"Authorization": f"Bearer {r.json()['access_token']}"}
+    last = None
+    for _ in range(8):
+        r = requests.post(f"{API}/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}, timeout=20)
+        last = r
+        if r.status_code == 200:
+            return {"Authorization": f"Bearer {r.json()['access_token']}"}
+        if r.status_code == 429:
+            import time as _t
+            _t.sleep(15)
+            continue
+        break
+    assert False, f"Admin login failed: {last.text}"
 
 
 # ------------------ Existing email/password login regression ------------------

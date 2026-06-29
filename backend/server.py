@@ -8,6 +8,7 @@ import os
 import io
 import uuid
 import base64
+import hashlib
 import logging
 import secrets
 import asyncio
@@ -23,7 +24,10 @@ from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Header,
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field, EmailStr, ConfigDict
+from pydantic import BaseModel, Field, EmailStr, ConfigDict, field_validator
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 # ------------------ Setup ------------------
 
@@ -31,11 +35,16 @@ MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = int(os.environ.get("JWT_EXPIRE_HOURS", "24"))
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
+limiter = Limiter(key_func=get_remote_address, default_limits=[])
+
 app = FastAPI(title="WA Gateway API", version="1.0.0")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 api_router = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -64,10 +73,14 @@ def create_access_token(user_id: str, email: str) -> str:
     payload = {
         "sub": user_id,
         "email": email,
-        "exp": datetime.now(timezone.utc) + timedelta(days=7),
+        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRE_HOURS),
         "type": "access",
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def hash_api_key(key: str) -> str:
+    """One-way hash for API keys at rest. We never store the plaintext key."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
@@ -81,6 +94,8 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+    if payload.get("type") != "access":
+        raise HTTPException(status_code=401, detail="Invalid token type")
     user = await db.users.find_one({"id": payload["sub"]})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
@@ -99,12 +114,13 @@ async def require_admin(user: Dict[str, Any] = Depends(get_current_user)) -> Dic
 async def get_user_by_api_key(x_api_key: Optional[str] = Header(None)) -> Dict[str, Any]:
     if not x_api_key:
         raise HTTPException(status_code=401, detail="Missing X-API-Key header")
-    key_doc = await db.api_keys.find_one({"key": x_api_key, "revoked": False})
+    key_hash = hash_api_key(x_api_key)
+    key_doc = await db.api_keys.find_one({"key_hash": key_hash, "revoked": False})
     if not key_doc:
         raise HTTPException(status_code=401, detail="Invalid or revoked API key")
     user = await db.users.find_one({"id": key_doc["user_id"]})
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+    if not user or user.get("status", "active") != "active":
+        raise HTTPException(status_code=401, detail="User not found or inactive")
     await db.api_keys.update_one({"id": key_doc["id"]}, {"$set": {"last_used_at": now_iso()}})
     user.pop("password_hash", None)
     user.pop("_id", None)
@@ -149,8 +165,22 @@ class SendMessageReq(BaseModel):
 
 class BroadcastReq(BaseModel):
     session_id: str
-    numbers: List[str]
+    numbers: List[str] = Field(..., max_length=500)
     message: str
+
+    @field_validator("numbers")
+    @classmethod
+    def numbers_not_empty(cls, v):
+        if len(v) == 0:
+            raise ValueError("numbers cannot be empty")
+        return v
+
+class SimulateInboundReq(BaseModel):
+    session_id: str
+    text: str = Field(..., min_length=1, max_length=4096)
+    from_: Optional[str] = Field(default=None, alias="from")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 class AutoReplyRuleReq(BaseModel):
     session_id: Optional[str] = None  # null = all sessions
@@ -177,13 +207,24 @@ async def startup():
     await db.sessions.create_index("user_id")
     await db.messages.create_index("user_id")
     await db.messages.create_index("created_at")
-    await db.api_keys.create_index("key", unique=True)
+    await db.api_keys.create_index("id", unique=True)
+    await db.api_keys.create_index("key_hash", unique=True, sparse=True)
     await db.auto_replies.create_index("user_id")
+    # Drop the obsolete plaintext-key unique index if it exists (SEC-002 migration)
+    try:
+        await db.api_keys.drop_index("key_1")
+    except Exception:
+        pass
 
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@wagateway.com")
-    admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
     existing = await db.users.find_one({"email": admin_email})
     if not existing:
+        # Use ADMIN_PASSWORD env if provided, else generate a strong random one and log it once.
+        admin_password = os.environ.get("ADMIN_PASSWORD")
+        generated = False
+        if not admin_password:
+            admin_password = secrets.token_urlsafe(18)
+            generated = True
         await db.users.insert_one({
             "id": new_id(),
             "email": admin_email,
@@ -194,12 +235,34 @@ async def startup():
             "password_hash": hash_password(admin_password),
             "created_at": now_iso(),
         })
-        logger.info("Seeded admin user %s", admin_email)
-    elif not verify_password(admin_password, existing["password_hash"]):
-        await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_password)}})
+        if generated:
+            logger.warning("=" * 70)
+            logger.warning("FIRST-BOOT ADMIN CREATED — SAVE THIS PASSWORD NOW (shown only once)")
+            logger.warning("  email:    %s", admin_email)
+            logger.warning("  password: %s", admin_password)
+            logger.warning("=" * 70)
+        else:
+            logger.info("Seeded admin user %s from ADMIN_PASSWORD env", admin_email)
+    # NOTE: never force-reset admin password on subsequent startups (SEC-001).
     # Backfill status / auth_provider on existing users (idempotent)
     await db.users.update_many({"status": {"$exists": False}}, {"$set": {"status": "active"}})
     await db.users.update_many({"auth_provider": {"$exists": False}}, {"$set": {"auth_provider": "password"}})
+
+    # One-shot migration: hash any plaintext API keys still in DB (SEC-002).
+    async for k in db.api_keys.find({"key_hash": {"$exists": False}, "key": {"$exists": True}}):
+        plain = k.get("key", "")
+        await db.api_keys.update_one(
+            {"id": k["id"]},
+            {
+                "$set": {
+                    "key_hash": hash_api_key(plain),
+                    "key_prefix": plain[:8],
+                    "key_suffix": plain[-4:] if len(plain) >= 4 else "",
+                },
+                "$unset": {"key": ""},
+            },
+        )
+    logger.info("API key migration to hashed storage complete")
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -208,7 +271,8 @@ async def shutdown():
 # ------------------ Auth ------------------
 
 @api_router.post("/auth/register")
-async def register(req: RegisterReq):
+@limiter.limit("3/minute")
+async def register(request: Request, req: RegisterReq):
     email = req.email.lower().strip()
     if await db.users.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -229,7 +293,8 @@ async def register(req: RegisterReq):
     return {"user": user, "access_token": token, "token_type": "bearer"}
 
 @api_router.post("/auth/login")
-async def login(req: LoginReq):
+@limiter.limit("5/minute")
+async def login(request: Request, req: LoginReq):
     email = req.email.lower().strip()
     user = await db.users.find_one({"email": email})
     if not user or not user.get("password_hash") or not verify_password(req.password, user["password_hash"]):
@@ -247,7 +312,8 @@ async def login(req: LoginReq):
 EMERGENT_SESSION_DATA_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
 
 @api_router.post("/auth/google/session")
-async def google_session(req: GoogleSessionReq):
+@limiter.limit("10/minute")
+async def google_session(request: Request, req: GoogleSessionReq):
     """Exchange Emergent session_id for our JWT.
     REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
     """
@@ -533,14 +599,12 @@ async def delete_rule(rule_id: str, user=Depends(get_current_user)):
     return {"ok": True}
 
 @api_router.post("/auto-replies/simulate")
-async def simulate_incoming(payload: Dict[str, Any], user=Depends(get_current_user)):
+async def simulate_incoming(req: SimulateInboundReq, user=Depends(get_current_user)):
     """Helper to simulate an incoming message and trigger auto-reply rules.
     Used to demonstrate auto-reply flow in UI without a real WA inbound."""
-    session_id = payload.get("session_id")
-    text = (payload.get("text") or "").strip()
-    sender = payload.get("from") or "62" + "".join(str(random.randint(0,9)) for _ in range(10))
-    if not session_id or not text:
-        raise HTTPException(status_code=400, detail="session_id and text required")
+    session_id = req.session_id
+    text = req.text.strip()
+    sender = req.from_ or "62" + "".join(str(random.randint(0, 9)) for _ in range(10))
     sess = await db.sessions.find_one({"id": session_id, "user_id": user["id"]})
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -591,13 +655,19 @@ async def create_api_key(req: ApiKeyCreateReq, user=Depends(get_current_user)):
         "id": new_id(),
         "user_id": user["id"],
         "label": req.label,
-        "key": key,
+        "key_hash": hash_api_key(key),
+        "key_prefix": key[:8],
+        "key_suffix": key[-4:],
         "revoked": False,
         "created_at": now_iso(),
         "last_used_at": None,
     }
     await db.api_keys.insert_one(doc)
-    return clean_doc(doc)
+    # Return the FULL key once at creation. Subsequent listings only return masked form.
+    out = clean_doc(dict(doc))
+    out.pop("key_hash", None)
+    out["key"] = key
+    return out
 
 @api_router.get("/api-keys")
 async def list_api_keys(user=Depends(get_current_user)):
@@ -605,8 +675,10 @@ async def list_api_keys(user=Depends(get_current_user)):
     items = []
     async for d in cursor:
         d = clean_doc(d)
-        # show masked except for last 4
-        d["key_masked"] = d["key"][:8] + "..." + d["key"][-4:]
+        prefix = d.get("key_prefix", "wag_")
+        suffix = d.get("key_suffix", "")
+        d["key_masked"] = f"{prefix}...{suffix}"
+        d.pop("key_hash", None)  # never expose the hash
         items.append(d)
     return items
 
@@ -623,7 +695,8 @@ async def revoke_api_key(key_id: str, user=Depends(get_current_user)):
 # ------------------ Public REST API (X-API-Key) ------------------
 
 @api_router.post("/v1/send")
-async def public_send(req: PublicSendReq, user=Depends(get_user_by_api_key)):
+@limiter.limit("60/minute")
+async def public_send(request: Request, req: PublicSendReq, user=Depends(get_user_by_api_key)):
     return await _process_send(user["id"], req.session_id, req.to, req.message, source="api")
 
 @api_router.get("/v1/sessions")
@@ -681,10 +754,14 @@ async def root():
 
 app.include_router(api_router)
 
+_default_cors = "http://localhost:3000"
+_cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", _default_cors).split(",") if o.strip()]
+_allow_all = _cors_origins == ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_credentials=not _allow_all,
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

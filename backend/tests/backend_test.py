@@ -23,9 +23,17 @@ ADMIN_PASSWORD = "admin123"
 
 @pytest.fixture(scope="session")
 def admin_token():
-    r = requests.post(f"{API}/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}, timeout=20)
-    assert r.status_code == 200, f"Login failed: {r.status_code} {r.text}"
-    return r.json()["access_token"]
+    last = None
+    for _ in range(8):
+        r = requests.post(f"{API}/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}, timeout=20)
+        last = r
+        if r.status_code == 200:
+            return r.json()["access_token"]
+        if r.status_code == 429:
+            time.sleep(15)
+            continue
+        break
+    assert False, f"Login failed: {last.status_code} {last.text}"
 
 
 @pytest.fixture(scope="session")
