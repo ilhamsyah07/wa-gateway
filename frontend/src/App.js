@@ -9,6 +9,7 @@ import { Toaster } from "@/components/ui/sonner";
 import Login from "@/pages/Login";
 import Register from "@/pages/Register";
 import AuthCallback from "@/pages/AuthCallback";
+import AcceptInvitation from "@/pages/AcceptInvitation";
 import Dashboard from "@/pages/Dashboard";
 import Sessions from "@/pages/Sessions";
 import SendMessage from "@/pages/SendMessage";
@@ -28,6 +29,7 @@ function AppRouter() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
+      <Route path="/invite/:token" element={<AcceptInvitation />} />
       <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
         <Route index element={<Dashboard />} />
         <Route path="sessions" element={<Sessions />} />

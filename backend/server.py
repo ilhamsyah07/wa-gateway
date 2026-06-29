@@ -37,6 +37,17 @@ JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = int(os.environ.get("JWT_EXPIRE_HOURS", "24"))
 
+# Baileys microservice — when BAILEYS_URL is set we proxy to a real Node service,
+# otherwise we run the in-process MOCK (for dev / Emergent preview).
+BAILEYS_URL = os.environ.get("BAILEYS_URL", "").rstrip("/")
+BAILEYS_TOKEN = os.environ.get("BAILEYS_TOKEN", "")
+USE_REAL_BAILEYS = bool(BAILEYS_URL)
+
+# Resend (email) — when RESEND_API_KEY is set, send real emails for invitations + approvals.
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+RESEND_FROM = os.environ.get("RESEND_FROM", "WA Gateway <onboarding@resend.dev>")
+APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "http://localhost:3000")
+
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
@@ -83,6 +94,45 @@ def create_access_token(user_id: str, email: str) -> str:
 def hash_api_key(key: str) -> str:
     """One-way hash for API keys at rest. We never store the plaintext key."""
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+# ------------------ Email (Resend) ------------------
+
+async def send_email(to: str, subject: str, html: str) -> bool:
+    """Send a transactional email via Resend. No-ops if RESEND_API_KEY is unset.
+    Returns True if accepted by Resend, False otherwise."""
+    if not RESEND_API_KEY:
+        logger.info("[email no-op] to=%s subject=%s (RESEND_API_KEY not set)", to, subject)
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            r = await http.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+                json={"from": RESEND_FROM, "to": [to], "subject": subject, "html": html},
+            )
+        if r.status_code >= 400:
+            logger.warning("Resend error %s: %s", r.status_code, r.text)
+            return False
+        return True
+    except Exception as e:
+        logger.warning("Resend exception: %s", e)
+        return False
+
+
+def _email_template(title: str, intro: str, button_text: Optional[str] = None, button_url: Optional[str] = None, footer: str = "") -> str:
+    btn = ""
+    if button_text and button_url:
+        btn = f'<a href="{button_url}" style="display:inline-block;padding:12px 24px;background:#18181b;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;font-size:14px;font-family:system-ui,-apple-system,sans-serif">{button_text}</a>'
+    return f"""
+    <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto;padding:32px;color:#18181b">
+      <div style="font-size:14px;color:#71717a;letter-spacing:0.06em;text-transform:uppercase;font-family:ui-monospace,SFMono-Regular,monospace;margin-bottom:24px">WA Gateway</div>
+      <h1 style="font-size:24px;margin:0 0 16px;font-weight:700;letter-spacing:-0.02em">{title}</h1>
+      <p style="font-size:15px;line-height:1.6;color:#52525b;margin:0 0 24px">{intro}</p>
+      {btn}
+      <p style="font-size:12px;color:#a1a1aa;margin:32px 0 0">{footer}</p>
+    </div>
+    """
 
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
@@ -134,6 +184,45 @@ def make_qr_data_url(payload: str) -> str:
     img.save(buf, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
+# ------------------ Baileys client (proxy to Node microservice) ------------------
+
+async def _baileys_request(method: str, path: str, json: Optional[Dict[str, Any]] = None):
+    headers = {"X-Internal-Token": BAILEYS_TOKEN} if BAILEYS_TOKEN else {}
+    async with httpx.AsyncClient(timeout=20) as http:
+        r = await http.request(method, f"{BAILEYS_URL}{path}", json=json, headers=headers)
+    return r
+
+async def baileys_connect(session_id: str) -> Dict[str, Any]:
+    r = await _baileys_request("POST", f"/sessions/{session_id}/connect")
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Baileys service error: {r.text}")
+    return r.json()
+
+async def baileys_get(session_id: str) -> Optional[Dict[str, Any]]:
+    r = await _baileys_request("GET", f"/sessions/{session_id}")
+    if r.status_code == 404:
+        return None
+    if r.status_code != 200:
+        return None
+    return r.json()
+
+async def baileys_send(session_id: str, to: str, message: str,
+                       media_url: Optional[str] = None, media_type: Optional[str] = None) -> Dict[str, Any]:
+    body = {"to": to, "message": message}
+    if media_url:
+        body["mediaUrl"] = media_url
+        body["mediaType"] = media_type or "image"
+    r = await _baileys_request("POST", f"/sessions/{session_id}/send", json=body)
+    if r.status_code == 200:
+        return {"status": "sent", **r.json()}
+    return {"status": "failed", "error": r.text}
+
+async def baileys_disconnect(session_id: str) -> None:
+    await _baileys_request("POST", f"/sessions/{session_id}/disconnect")
+
+async def baileys_delete(session_id: str) -> None:
+    await _baileys_request("DELETE", f"/sessions/{session_id}")
+
 def clean_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     if doc is None:
         return None
@@ -153,6 +242,15 @@ class LoginReq(BaseModel):
 
 class GoogleSessionReq(BaseModel):
     session_id: str
+
+class InvitationCreateReq(BaseModel):
+    email: EmailStr
+    name: Optional[str] = None
+    role: str = "user"
+
+class InvitationAcceptReq(BaseModel):
+    name: str
+    password: str = Field(min_length=6)
 
 class SessionCreateReq(BaseModel):
     name: str
@@ -212,6 +310,8 @@ async def startup():
     await db.api_keys.create_index("id", unique=True)
     await db.api_keys.create_index("key_hash", unique=True, sparse=True)
     await db.auto_replies.create_index("user_id")
+    await db.invitations.create_index("token", unique=True)
+    await db.invitations.create_index("email")
     # Drop the obsolete plaintext-key unique index if it exists (SEC-002 migration)
     try:
         await db.api_keys.drop_index("key_1")
@@ -384,9 +484,19 @@ async def admin_list_users(status: Optional[str] = None, admin=Depends(require_a
 
 @api_router.post("/admin/users/{user_id}/approve")
 async def admin_approve_user(user_id: str, admin=Depends(require_admin)):
-    res = await db.users.update_one({"id": user_id}, {"$set": {"status": "active", "approved_at": now_iso(), "approved_by": admin["id"]}})
-    if res.matched_count == 0:
+    target = await db.users.find_one({"id": user_id})
+    if not target:
         raise HTTPException(status_code=404, detail="User not found")
+    await db.users.update_one({"id": user_id}, {"$set": {"status": "active", "approved_at": now_iso(), "approved_by": admin["id"]}})
+    # Notify user by email (best-effort)
+    html = _email_template(
+        title="Your WA Gateway account is approved",
+        intro="Good news — your account has been approved. You can now sign in with Google.",
+        button_text="Sign in",
+        button_url=f"{APP_PUBLIC_URL.rstrip('/')}/login",
+        footer="WA Gateway · admin notification",
+    )
+    asyncio.create_task(send_email(target["email"], "Your WA Gateway account is approved", html))
     return {"ok": True}
 
 @api_router.post("/admin/users/{user_id}/reject")
@@ -398,6 +508,105 @@ async def admin_reject_user(user_id: str, admin=Depends(require_admin)):
         raise HTTPException(status_code=400, detail="Cannot reject an admin")
     await db.users.delete_one({"id": user_id})
     return {"ok": True}
+
+
+# ------------------ Invitations ------------------
+
+@api_router.post("/admin/invitations")
+async def create_invitation(req: InvitationCreateReq, admin=Depends(require_admin)):
+    email = req.email.lower().strip()
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="A user with that email already exists")
+    await db.invitations.update_many(
+        {"email": email, "status": "pending"},
+        {"$set": {"status": "revoked"}},
+    )
+    token = secrets.token_urlsafe(24)
+    doc = {
+        "id": new_id(),
+        "token": token,
+        "email": email,
+        "name": req.name or "",
+        "role": req.role if req.role in ("user", "admin") else "user",
+        "status": "pending",
+        "invited_by": admin["id"],
+        "created_at": now_iso(),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+        "accepted_at": None,
+    }
+    await db.invitations.insert_one(doc)
+    invite_url = f"{APP_PUBLIC_URL.rstrip('/')}/invite/{token}"
+    html = _email_template(
+        title="You're invited to WA Gateway",
+        intro=f"Hi{(' ' + req.name) if req.name else ''}, you've been invited to join WA Gateway. Click below to set your password and activate your account. This link expires in 7 days.",
+        button_text="Accept invitation",
+        button_url=invite_url,
+        footer=f"If you didn't expect this, ignore this email. Link: {invite_url}",
+    )
+    asyncio.create_task(send_email(email, "You're invited to WA Gateway", html))
+    return clean_doc(dict(doc))
+
+@api_router.get("/admin/invitations")
+async def list_invitations(admin=Depends(require_admin)):
+    cursor = db.invitations.find({}).sort("created_at", -1)
+    return [clean_doc(d) async for d in cursor]
+
+@api_router.delete("/admin/invitations/{invite_id}")
+async def revoke_invitation(invite_id: str, admin=Depends(require_admin)):
+    res = await db.invitations.update_one(
+        {"id": invite_id, "status": "pending"},
+        {"$set": {"status": "revoked"}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Invitation not found or not pending")
+    return {"ok": True}
+
+@api_router.get("/invitations/{token}")
+async def get_invitation(token: str):
+    """Public endpoint — fetch invitation by token to render the accept page."""
+    inv = await db.invitations.find_one({"token": token})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    if inv["status"] != "pending":
+        raise HTTPException(status_code=410, detail=f"Invitation {inv['status']}")
+    if inv["expires_at"] < now_iso():
+        raise HTTPException(status_code=410, detail="Invitation expired")
+    return {"email": inv["email"], "name": inv.get("name", ""), "role": inv["role"]}
+
+@api_router.post("/invitations/{token}/accept")
+@limiter.limit("5/minute")
+async def accept_invitation(request: Request, token: str, req: InvitationAcceptReq):
+    inv = await db.invitations.find_one({"token": token})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    if inv["status"] != "pending":
+        raise HTTPException(status_code=410, detail=f"Invitation {inv['status']}")
+    if inv["expires_at"] < now_iso():
+        raise HTTPException(status_code=410, detail="Invitation expired")
+    if await db.users.find_one({"email": inv["email"]}):
+        await db.invitations.update_one({"id": inv["id"]}, {"$set": {"status": "revoked"}})
+        raise HTTPException(status_code=400, detail="A user with that email already exists")
+    user = {
+        "id": new_id(),
+        "email": inv["email"],
+        "name": req.name.strip(),
+        "role": inv["role"],
+        "status": "active",
+        "auth_provider": "password",
+        "password_hash": hash_password(req.password),
+        "invited_by": inv["invited_by"],
+        "created_at": now_iso(),
+    }
+    await db.users.insert_one(user)
+    await db.invitations.update_one(
+        {"id": inv["id"]},
+        {"$set": {"status": "accepted", "accepted_at": now_iso(), "accepted_user_id": user["id"]}},
+    )
+    token_jwt = create_access_token(user["id"], user["email"])
+    user.pop("password_hash", None)
+    user.pop("_id", None)
+    return {"user": user, "access_token": token_jwt, "token_type": "bearer"}
+
 
 @api_router.get("/auth/me")
 async def me(user: Dict[str, Any] = Depends(get_current_user)):
@@ -429,21 +638,33 @@ async def simulate_qr_lifecycle(session_id: str):
 @api_router.post("/sessions")
 async def create_session(req: SessionCreateReq, user=Depends(get_current_user)):
     sid = new_id()
-    qr_payload = f"wa-gateway:{sid}:{secrets.token_urlsafe(12)}"
-    qr = make_qr_data_url(qr_payload)
     doc = {
         "id": sid,
         "user_id": user["id"],
         "name": req.name,
         "phone_label": req.phone_label,
-        "status": "qr",  # qr | connecting | connected | disconnected
-        "qr_data_url": qr,
+        "status": "qr",
+        "qr_data_url": None,
         "phone_number": None,
         "created_at": now_iso(),
         "connected_at": None,
     }
+    if USE_REAL_BAILEYS:
+        # Real Baileys: ask Node service to spin up the session and return initial QR.
+        try:
+            st = await baileys_connect(sid)
+            doc["status"] = st.get("status", "qr")
+            doc["qr_data_url"] = st.get("qr_data_url")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Baileys connect failed: {e}")
+    else:
+        # MOCK: generate fake QR + schedule auto-connect lifecycle
+        qr_payload = f"wa-gateway:{sid}:{secrets.token_urlsafe(12)}"
+        doc["qr_data_url"] = make_qr_data_url(qr_payload)
+        asyncio.create_task(simulate_qr_lifecycle(sid))
     await db.sessions.insert_one(doc)
-    asyncio.create_task(simulate_qr_lifecycle(sid))
     return clean_doc(doc)
 
 @api_router.get("/sessions")
@@ -457,6 +678,19 @@ async def get_session(session_id: str, user=Depends(get_current_user)):
     sess = await db.sessions.find_one({"id": session_id, "user_id": user["id"]})
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
+    if USE_REAL_BAILEYS:
+        # Refresh transient fields (status/qr) from the Baileys service
+        live = await baileys_get(session_id)
+        if live:
+            patch = {
+                "status": live.get("status", sess["status"]),
+                "qr_data_url": live.get("qr_data_url"),
+                "phone_number": live.get("phone_number") or sess.get("phone_number"),
+            }
+            if patch["status"] == "connected" and not sess.get("connected_at"):
+                patch["connected_at"] = now_iso()
+            await db.sessions.update_one({"id": session_id}, {"$set": patch})
+            sess.update(patch)
     return clean_doc(sess)
 
 @api_router.post("/sessions/{session_id}/regenerate-qr")
@@ -464,6 +698,15 @@ async def regenerate_qr(session_id: str, user=Depends(get_current_user)):
     sess = await db.sessions.find_one({"id": session_id, "user_id": user["id"]})
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
+    if USE_REAL_BAILEYS:
+        await baileys_delete(session_id)
+        st = await baileys_connect(session_id)
+        await db.sessions.update_one(
+            {"id": session_id},
+            {"$set": {"status": st.get("status", "qr"), "qr_data_url": st.get("qr_data_url"),
+                      "connected_at": None, "phone_number": None}},
+        )
+        return {"qr_data_url": st.get("qr_data_url"), "status": st.get("status", "qr")}
     qr_payload = f"wa-gateway:{session_id}:{secrets.token_urlsafe(12)}"
     qr = make_qr_data_url(qr_payload)
     await db.sessions.update_one(
@@ -478,6 +721,8 @@ async def disconnect_session(session_id: str, user=Depends(get_current_user)):
     sess = await db.sessions.find_one({"id": session_id, "user_id": user["id"]})
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
+    if USE_REAL_BAILEYS:
+        await baileys_disconnect(session_id)
     await db.sessions.update_one(
         {"id": session_id},
         {"$set": {"status": "disconnected", "qr_data_url": None}},
@@ -486,9 +731,12 @@ async def disconnect_session(session_id: str, user=Depends(get_current_user)):
 
 @api_router.delete("/sessions/{session_id}")
 async def delete_session(session_id: str, user=Depends(get_current_user)):
-    res = await db.sessions.delete_one({"id": session_id, "user_id": user["id"]})
-    if res.deleted_count == 0:
+    sess = await db.sessions.find_one({"id": session_id, "user_id": user["id"]})
+    if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
+    if USE_REAL_BAILEYS:
+        await baileys_delete(session_id)
+    await db.sessions.delete_one({"id": session_id, "user_id": user["id"]})
     return {"ok": True}
 
 # ------------------ Messages ------------------
@@ -502,8 +750,13 @@ async def _process_send(user_id: str, session_id: str, to: str, message: str,
     if sess["status"] != "connected":
         raise HTTPException(status_code=400, detail="Session is not connected. Scan QR first.")
     msg_id = new_id()
-    # simulate 92% success rate
-    status = "sent" if random.random() < 0.92 else "failed"
+    provider_msg_id = None
+    if USE_REAL_BAILEYS:
+        res = await baileys_send(session_id, to, message, media_url, media_type)
+        status = res.get("status", "failed")
+        provider_msg_id = res.get("message_id")
+    else:
+        status = "sent" if random.random() < 0.92 else "failed"
     doc = {
         "id": msg_id,
         "user_id": user_id,
@@ -515,7 +768,8 @@ async def _process_send(user_id: str, session_id: str, to: str, message: str,
         "media_url": media_url,
         "media_type": media_type,
         "status": status,
-        "source": source,  # ui | broadcast | api | auto_reply
+        "provider_message_id": provider_msg_id,
+        "source": source,
         "created_at": now_iso(),
     }
     await db.messages.insert_one(doc)
@@ -600,10 +854,39 @@ async def delete_rule(rule_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Rule not found")
     return {"ok": True}
 
+async def _match_and_reply(user_id: str, session_id: str, sender: str, text: str) -> Optional[Dict[str, Any]]:
+    """Find a matching auto-reply rule for the user/session/text and send the reply.
+    Returns the outbound message doc if a rule matched, else None."""
+    rules = await db.auto_replies.find({
+        "user_id": user_id,
+        "active": True,
+        "$or": [{"session_id": session_id}, {"session_id": None}],
+    }).to_list(100)
+    low = text.lower()
+    matched = None
+    for r in rules:
+        kw = r["keyword"].lower().strip()
+        mt = r.get("match_type", "contains")
+        if mt == "exact" and low == kw:
+            matched = r
+            break
+        if mt == "starts_with" and low.startswith(kw):
+            matched = r
+            break
+        if mt == "contains" and kw in low:
+            matched = r
+            break
+    if not matched:
+        return None
+    try:
+        return await _process_send(user_id, session_id, sender, matched["reply"], source="auto_reply")
+    except HTTPException:
+        return None
+
+
 @api_router.post("/auto-replies/simulate")
 async def simulate_incoming(req: SimulateInboundReq, user=Depends(get_current_user)):
-    """Helper to simulate an incoming message and trigger auto-reply rules.
-    Used to demonstrate auto-reply flow in UI without a real WA inbound."""
+    """Helper to simulate an incoming message and trigger auto-reply rules."""
     session_id = req.session_id
     text = req.text.strip()
     sender = req.from_ or "62" + "".join(str(random.randint(0, 9)) for _ in range(10))
@@ -623,30 +906,23 @@ async def simulate_incoming(req: SimulateInboundReq, user=Depends(get_current_us
         "created_at": now_iso(),
     }
     await db.messages.insert_one(inbound)
-    # match rules
-    rules = await db.auto_replies.find({
-        "user_id": user["id"],
-        "active": True,
-        "$or": [{"session_id": session_id}, {"session_id": None}],
-    }).to_list(100)
-    matched = None
-    low = text.lower()
-    for r in rules:
-        kw = r["keyword"].lower().strip()
-        mt = r.get("match_type", "contains")
-        if mt == "exact" and low == kw:
-            matched = r
-            break
-        if mt == "starts_with" and low.startswith(kw):
-            matched = r
-            break
-        if mt == "contains" and kw in low:
-            matched = r
-            break
-    reply_doc = None
-    if matched:
-        reply_doc = await _process_send(user["id"], session_id, sender, matched["reply"], source="auto_reply")
-    return {"inbound": clean_doc(inbound), "matched_rule": clean_doc(matched), "reply": reply_doc}
+    reply_doc = await _match_and_reply(user["id"], session_id, sender, text)
+    # find matched rule for response (re-query for visibility)
+    matched_rule = None
+    if reply_doc:
+        rules = await db.auto_replies.find({
+            "user_id": user["id"], "active": True,
+            "$or": [{"session_id": session_id}, {"session_id": None}],
+        }).to_list(100)
+        low = text.lower()
+        for r in rules:
+            kw = r["keyword"].lower().strip()
+            mt = r.get("match_type", "contains")
+            ok = (mt == "exact" and low == kw) or (mt == "starts_with" and low.startswith(kw)) or (mt == "contains" and kw in low)
+            if ok:
+                matched_rule = r
+                break
+    return {"inbound": clean_doc(inbound), "matched_rule": clean_doc(matched_rule), "reply": reply_doc}
 
 # ------------------ API Keys ------------------
 
@@ -747,6 +1023,68 @@ async def stats_overview(user=Depends(get_current_user)):
         "success_rate": success_rate,
         "series": series,
     }
+
+# ------------------ Baileys webhook (inbound from Node service) ------------------
+
+@api_router.post("/webhook/baileys")
+async def baileys_webhook(request: Request):
+    """Receives events pushed by the Baileys Node microservice:
+       - event=qr / connected / disconnected → update session status
+       - event=message → record inbound + trigger auto-reply
+    Auth: shared secret via X-Internal-Token header.
+    """
+    if BAILEYS_TOKEN and request.headers.get("x-internal-token") != BAILEYS_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid internal token")
+    payload = await request.json()
+    event = payload.get("event")
+    session_id = payload.get("session_id")
+    if not event or not session_id:
+        raise HTTPException(status_code=400, detail="event and session_id required")
+
+    sess = await db.sessions.find_one({"id": session_id})
+    if not sess:
+        return {"ok": True, "skip": "unknown session"}
+
+    if event == "qr":
+        # Service usually returns the QR via /sessions/:id GET; we only mark status here.
+        await db.sessions.update_one({"id": session_id}, {"$set": {"status": "qr"}})
+    elif event == "connected":
+        await db.sessions.update_one(
+            {"id": session_id},
+            {"$set": {
+                "status": "connected",
+                "phone_number": payload.get("phone_number"),
+                "qr_data_url": None,
+                "connected_at": now_iso(),
+            }},
+        )
+    elif event == "disconnected":
+        await db.sessions.update_one(
+            {"id": session_id},
+            {"$set": {"status": payload.get("status", "disconnected"), "qr_data_url": None}},
+        )
+    elif event == "message":
+        text = payload.get("text") or ""
+        sender = payload.get("from") or ""
+        if not text or not sender:
+            return {"ok": True}
+        await db.messages.insert_one({
+            "id": new_id(),
+            "user_id": sess["user_id"],
+            "session_id": session_id,
+            "direction": "inbound",
+            "to": sess.get("phone_number"),
+            "from": sender,
+            "message": text,
+            "status": "received",
+            "source": "inbound",
+            "provider_message_id": payload.get("message_id"),
+            "created_at": now_iso(),
+        })
+        # Auto-reply, fire-and-forget
+        asyncio.create_task(_match_and_reply(sess["user_id"], session_id, sender, text))
+    return {"ok": True}
+
 
 # ------------------ Health ------------------
 

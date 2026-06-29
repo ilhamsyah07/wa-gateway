@@ -3,6 +3,7 @@ import api, { formatApiError } from "@/lib/api";
 import { useT } from "@/i18n/LanguageContext";
 import { Button } from "@/components/ui/button";
 import StatusBadge from "@/components/StatusBadge";
+import Invitations from "@/components/Invitations";
 import { Users, Check, X } from "lucide-react";
 import { toast } from "sonner";
 
@@ -116,6 +117,10 @@ export default function AdminUsers() {
           </table>
         </div>
       )}
+
+      <div className="pt-8 mt-8 border-t border-zinc-200">
+        <Invitations />
+      </div>
     </div>
   );
 }

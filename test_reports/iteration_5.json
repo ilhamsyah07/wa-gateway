@@ -1,0 +1,48 @@
+{
+  "summary": "Iteration 5 — Verified the BIG feature drop: invitations (create/list/revoke/public-read/accept), Resend email no-op, /api/webhook/baileys endpoint, and USE_REAL_BAILEYS branching for simulation fallback. Created /app/backend/tests/test_invitations.py with 14 new tests — ALL 14 PASS. Full suite (backend_test + test_admin_approval + test_security + test_invitations) = 58/61 pass. The 3 failures are pre-existing/transient: 2× rate-limit collisions in test_login_invalid + test_register_and_duplicate when run in parallel with the new invitation suite (slowapi counters exhausted by 8-attempt admin login retries — not a regression), and 1× the same flaky TestAutoReply.test_rule_crud_and_simulate that fails since iterations 1–4 (stale 'contains' rule pollution). Email no-op confirmed via /var/log/supervisor/backend.err.log: 10× '[email no-op] to=... subject=... (RESEND_API_KEY not set)' lines emitted during the test run, none crashed the request. Webhook /api/webhook/baileys reachable: no token configured so 400 returned for missing event/session_id, 200 + skip-payload for unknown session. Baileys USE_REAL_BAILEYS branching grep'd: 7 occurrences in server.py covering create/get/regenerate-qr/disconnect/delete sessions + _process_send + webhook constant — all branches default to simulation when BAILEYS_URL is unset. Frontend E2E (1440x900): admin login → /admin/users shows Pending/Active/All tabs (3 tabs) AND Invitations panel below; New invitation dialog opens with email/name/role inputs; submitting POST /api/admin/invitations returns full URL https://.../invite/{token} rendered in [data-testid='new-invite-link'] with Copy button; after closing dialog new row appears (21 rows total in dev DB); navigating to /invite/{token} renders AcceptInvitation page with prefilled email + name/password form; submitting POST /api/invitations/{token}/accept logs the user in and redirects to /; re-visiting same token shows 'Invitation invalid — Invitation accepted' error UI (410); /invite/totally-bogus-token-zzz shows 'Invitation invalid — Invitation not found' gracefully (404). No JS exceptions thrown — only the expected 410/404 network-tab entries from the error states. Infra: /app/docker-compose.yml parses as valid YAML; /app/baileys-service/ contains Dockerfile + package.json + server.js + node_modules; /app/deploy/nginx.conf + /app/README-DEPLOY.md + /app/.env.example all present. No docker run attempted (out of scope).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/auth/login + /api/auth/register", "issue": "Same as iteration 4 — rate-limit (5/min and 3/min) collides with parallel test suites and the 8-attempt admin_token fixture, causing test_login_invalid / test_register_and_duplicate to occasionally 429 instead of 401/400. Not a product bug; consider Redis-backed slowapi or higher dev-mode limits."},
+      {"endpoint": "/api/auto-replies/simulate", "issue": "Same pre-existing flaky test from iterations 1–4 (TestAutoReply.test_rule_crud_and_simulate) — stale 'contains' rules in dev DB match before the freshly-created rule. Test-data hygiene only, NOT a regression."},
+      {"endpoint": "/api/webhook/baileys", "issue": "BAILEYS_TOKEN env not set in dev, so the endpoint is currently UNAUTHENTICATED (any caller can POST events). In production with real Baileys this MUST be set or the webhook can be spoofed to inject inbound messages / mark sessions connected. Documented in README-DEPLOY but worth a startup warning if USE_REAL_BAILEYS=True and BAILEYS_TOKEN is empty."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_invitations.py",
+    "/app/test_reports/pytest/iteration_5.xml",
+    "/app/test_reports/pytest/iteration_5_full.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: In server.py add a startup log.warning() when USE_REAL_BAILEYS is True but BAILEYS_TOKEN is empty (the webhook would accept anything).",
+    "OPTIONAL (carried): de-dupe stale auto-reply rules in dev DB or prefix the simulate-test keyword with a UUID to fix the flaky TestAutoReply.test_rule_crud_and_simulate.",
+    "OPTIONAL (carried): tighten rate-limit key_func / move slowapi storage to Redis so the auth-flood tests don't collide with parallel suites.",
+    "OPTIONAL: server.py is now 1108 lines — past the 700-line guideline. Split into routers/auth.py, routers/invitations.py, routers/sessions.py, routers/baileys_client.py, etc."
+  ],
+  "critical_code_review_comments": [
+    "server.py L40-44: USE_REAL_BAILEYS = bool(BAILEYS_URL) — clean env-driven switch. baileys_connect/get/send/disconnect/delete all share _baileys_request which sends X-Internal-Token only when BAILEYS_TOKEN is set. Solid.",
+    "server.py L99-120: send_email is properly async, no-ops with a log line when RESEND_API_KEY is empty, swallows httpx exceptions and returns False. Good defensive design.",
+    "server.py L515-547 create_invitation: idempotent — auto-revokes previous pending invites for same email before inserting new one. Returns the full invitation doc (incl. raw token). Good.",
+    "server.py L564-574 GET /invitations/{token}: returns 404 for unknown, 410 with reason for non-pending/expired. Exposes only {email, name, role} — does NOT leak invited_by/expires_at — good.",
+    "server.py L576-608 accept_invitation: rate-limited 5/min, validates password min_length=6 via Pydantic, atomically inserts user with status='active' and flips invite to 'accepted'. Race-window: if a user with that email is created between the get_invitation and insert, we revoke the invite and 400 — correct.",
+    "server.py L1029-1086 webhook/baileys: handles qr/connected/disconnected/message events. Unknown session returns {ok:true, skip:...} (no info leak). Message event fires _match_and_reply asynchronously. SECURITY GAP: when BAILEYS_TOKEN is empty the endpoint is open — fine for dev simulation but must be set in prod.",
+    "server.py is 1108 lines, well past the 700-line guideline. Strongly recommend splitting into routers/ submodules before next iteration.",
+    "All new endpoints exclude mongodb _id via clean_doc() — no ObjectId leakage. ✓",
+    "Frontend Invitations.jsx + AcceptInvitation.jsx have all documented data-testids and gracefully render 410/404 error states with clear copy ('Invitation invalid'). ✓"
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_invitations.py (new — 14 tests)"
+  ],
+  "success_rate": {"backend": "95% (58/61, 3 known-flaky/rate-collision failures, 14/14 new invitation suite passes)", "frontend": "100% (9/9 invitation flow steps)"},
+  "test_credentials": "admin@wagateway.com / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Created ~12 TEST_* invitation rows + ~5 TEST_* user accounts via the new invitation suite. Existing rate-limit on accept (5/min) honored with sleep(13) between dependent accept calls.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iteration 5 feature suite is solid. If running the full pytest suite again, expect 2× rate-limit-induced 429s in backend_test::TestAuth when run within ~1 min of a previous run — wait 60s between full runs or run files individually. The Baileys microservice is NOT running here (no Docker); only the FastAPI branching/webhook surface is tested. Real-Baileys path needs a separate VPS smoke test. RESEND_API_KEY remains intentionally unset.",
+  "rca of the issue": "N/A — no critical issues this iteration. Carry-over minor: (a) rate-limit collisions during parallel pytest = expected slowapi behaviour, mitigation = retry with backoff already in fixtures; (b) flaky simulate test = stale dev-DB rules, mitigation = prefix test keyword with UUID; (c) webhook auth gap when BAILEYS_TOKEN empty = enforce via startup warning + production env requirement."
+}
