@@ -2,8 +2,19 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-COPY package.json yarn.lock ./
-RUN yarn install --frozen-lockfile
+# Copy manifest first. yarn.lock is optional (glob falls through if absent),
+# but strongly recommended for reproducible builds — include it in your repo.
+COPY package.json ./
+COPY yarn.lock* ./
+
+# If yarn.lock exists use --frozen-lockfile for reproducibility; otherwise
+# install fresh and produce one (logged as a warning).
+RUN if [ -f yarn.lock ]; then \
+      yarn install --frozen-lockfile --network-timeout 600000; \
+    else \
+      echo "WARN: yarn.lock not found, generating a fresh one"; \
+      yarn install --network-timeout 600000; \
+    fi
 
 COPY . .
 
