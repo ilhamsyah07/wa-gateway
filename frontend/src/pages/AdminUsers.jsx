@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import api, { formatApiError } from "@/lib/api";
+import { useT } from "@/i18n/LanguageContext";
 import { Button } from "@/components/ui/button";
 import StatusBadge from "@/components/StatusBadge";
 import { Users, Check, X } from "lucide-react";
 import { toast } from "sonner";
 
 export default function AdminUsers() {
+  const { t } = useT();
   const [users, setUsers] = useState([]);
   const [tab, setTab] = useState("pending");
 
@@ -22,38 +24,38 @@ export default function AdminUsers() {
 
   const approve = async (id) => {
     await api.post(`/admin/users/${id}/approve`);
-    toast.success("User approved");
+    toast.success(t("admin.userApproved"));
     refresh();
   };
   const reject = async (id) => {
-    if (!confirm("Reject this user? Their account will be deleted.")) return;
+    if (!confirm(t("admin.rejectConfirm"))) return;
     await api.post(`/admin/users/${id}/reject`);
-    toast.message("User rejected");
+    toast.message(t("admin.userRejected"));
     refresh();
   };
 
   return (
     <div className="space-y-8 fade-up" data-testid="admin-users-page">
       <div>
-        <h1 className="text-3xl md:text-4xl font-bold tracking-tight">User Approvals</h1>
-        <p className="mt-2 text-sm text-zinc-500">Review and approve users who signed up via Google.</p>
+        <h1 className="text-3xl md:text-4xl font-bold tracking-tight">{t("admin.title")}</h1>
+        <p className="mt-2 text-sm text-zinc-500">{t("admin.subtitle")}</p>
       </div>
 
       <div className="flex gap-1 border-b border-zinc-200">
         {[
-          { key: "pending", label: "Pending" },
-          { key: "active", label: "Active" },
-          { key: "all", label: "All" },
-        ].map((t) => (
+          { key: "pending", label: t("admin.tabPending") },
+          { key: "active", label: t("admin.tabActive") },
+          { key: "all", label: t("admin.tabAll") },
+        ].map((tb) => (
           <button
-            key={t.key}
-            data-testid={`tab-${t.key}`}
-            onClick={() => setTab(t.key)}
+            key={tb.key}
+            data-testid={`tab-${tb.key}`}
+            onClick={() => setTab(tb.key)}
             className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px ${
-              tab === t.key ? "border-zinc-900 text-zinc-900" : "border-transparent text-zinc-500 hover:text-zinc-900"
+              tab === tb.key ? "border-zinc-900 text-zinc-900" : "border-transparent text-zinc-500 hover:text-zinc-900"
             }`}
           >
-            {t.label}
+            {tb.label}
           </button>
         ))}
       </div>
@@ -61,17 +63,17 @@ export default function AdminUsers() {
       {users.length === 0 ? (
         <div className="bg-white border border-dashed border-zinc-300 rounded-xl p-12 text-center">
           <Users className="size-10 mx-auto text-zinc-400" />
-          <div className="mt-4 font-semibold">No users in this view</div>
+          <div className="mt-4 font-semibold">{t("admin.noUsers")}</div>
         </div>
       ) : (
         <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-zinc-50">
               <tr className="text-left text-xs uppercase tracking-wider text-zinc-500 font-mono">
-                <th className="px-4 py-3">User</th>
-                <th className="px-4 py-3">Provider</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Created</th>
+                <th className="px-4 py-3">{t("admin.user")}</th>
+                <th className="px-4 py-3">{t("admin.provider")}</th>
+                <th className="px-4 py-3">{t("common.status")}</th>
+                <th className="px-4 py-3">{t("common.created")}</th>
                 <th className="px-4 py-3"></th>
               </tr>
             </thead>
@@ -100,7 +102,7 @@ export default function AdminUsers() {
                     {u.status === "pending" && u.role !== "admin" && (
                       <>
                         <Button size="sm" variant="outline" onClick={() => approve(u.id)} data-testid={`approve-${u.id}`}>
-                          <Check className="size-3.5 mr-1 text-emerald-600" /> Approve
+                          <Check className="size-3.5 mr-1 text-emerald-600" /> {t("admin.approve")}
                         </Button>
                         <Button size="sm" variant="ghost" onClick={() => reject(u.id)} data-testid={`reject-${u.id}`}>
                           <X className="size-3.5 text-red-500" />

@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
+import { useT } from "@/i18n/LanguageContext";
+import LanguageSwitcher from "@/components/LanguageSwitcher";
 import { formatApiError } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,6 +11,7 @@ import { Sparkles, ArrowRight, AlertCircle } from "lucide-react";
 
 export default function Register() {
   const { register } = useAuth();
+  const { t } = useT();
   const nav = useNavigate();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -25,7 +28,8 @@ export default function Register() {
   };
 
   return (
-    <div className="min-h-screen flex">
+    <div className="min-h-screen flex relative">
+      <div className="absolute top-4 right-4 z-10"><LanguageSwitcher /></div>
       <div className="flex-1 flex items-center justify-center px-6 py-12 bg-white">
         <div className="w-full max-w-sm fade-up">
           <div className="flex items-center gap-2 mb-12">
@@ -35,20 +39,20 @@ export default function Register() {
             <span className="font-bold tracking-tight">WA Gateway</span>
           </div>
 
-          <h1 className="text-3xl font-bold tracking-tight">Create your account</h1>
-          <p className="mt-2 text-sm text-zinc-500">Start sending messages in minutes.</p>
+          <h1 className="text-3xl font-bold tracking-tight">{t("auth.createYourAccount")}</h1>
+          <p className="mt-2 text-sm text-zinc-500">{t("auth.startSendingMessages")}</p>
 
           <form onSubmit={onSubmit} className="mt-10 space-y-5" data-testid="register-form">
             <div className="space-y-2">
-              <Label className="text-xs uppercase tracking-wider text-zinc-500 font-mono">Name</Label>
+              <Label className="text-xs uppercase tracking-wider text-zinc-500 font-mono">{t("common.name")}</Label>
               <Input value={name} onChange={(e) => setName(e.target.value)} required data-testid="register-name-input" />
             </div>
             <div className="space-y-2">
-              <Label className="text-xs uppercase tracking-wider text-zinc-500 font-mono">Email</Label>
+              <Label className="text-xs uppercase tracking-wider text-zinc-500 font-mono">{t("common.email")}</Label>
               <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required data-testid="register-email-input" />
             </div>
             <div className="space-y-2">
-              <Label className="text-xs uppercase tracking-wider text-zinc-500 font-mono">Password</Label>
+              <Label className="text-xs uppercase tracking-wider text-zinc-500 font-mono">{t("auth.password")}</Label>
               <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={6} data-testid="register-password-input" />
             </div>
 
@@ -59,12 +63,12 @@ export default function Register() {
             )}
 
             <Button type="submit" disabled={loading} className="w-full" data-testid="register-submit-button">
-              {loading ? "Creating…" : "Create account"} <ArrowRight className="ml-2 size-4" />
+              {loading ? t("auth.creating") : t("auth.createAccount")} <ArrowRight className="ml-2 size-4" />
             </Button>
           </form>
 
           <p className="mt-8 text-sm text-zinc-500">
-            Already have an account? <Link to="/login" className="text-zinc-900 font-medium hover:underline" data-testid="goto-login-link">Sign in</Link>
+            {t("auth.alreadyHaveAccount")} <Link to="/login" className="text-zinc-900 font-medium hover:underline" data-testid="goto-login-link">{t("auth.signIn")}</Link>
           </p>
         </div>
       </div>

@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
+import { useT } from "@/i18n/LanguageContext";
+import LanguageSwitcher from "@/components/LanguageSwitcher";
 import { formatApiError } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,6 +13,7 @@ import { Sparkles, ArrowRight, AlertCircle } from "lucide-react";
 
 export default function Login() {
   const { login } = useAuth();
+  const { t } = useT();
   const nav = useNavigate();
   const location = useLocation();
   const [email, setEmail] = useState("admin@wagateway.com");
@@ -36,8 +39,9 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen flex">
-      {/* Left: form */}
+    <div className="min-h-screen flex relative">
+      <div className="absolute top-4 right-4 z-10"><LanguageSwitcher /></div>
+
       <div className="flex-1 flex items-center justify-center px-6 py-12 bg-white">
         <div className="w-full max-w-sm fade-up">
           <div className="flex items-center gap-2 mb-12">
@@ -47,8 +51,8 @@ export default function Login() {
             <span className="font-bold tracking-tight">WA Gateway</span>
           </div>
 
-          <h1 className="text-3xl font-bold tracking-tight text-zinc-900">Welcome back</h1>
-          <p className="mt-2 text-sm text-zinc-500">Sign in to manage your WhatsApp sessions and API keys.</p>
+          <h1 className="text-3xl font-bold tracking-tight text-zinc-900">{t("auth.welcomeBack")}</h1>
+          <p className="mt-2 text-sm text-zinc-500">{t("auth.signInSubtitle")}</p>
 
           <button
             type="button"
@@ -62,22 +66,22 @@ export default function Login() {
               <path fill="#FBBC05" d="M5.84 14.09a6.6 6.6 0 0 1 0-4.18V7.07H2.18a11 11 0 0 0 0 9.86l3.66-2.84z" />
               <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84C6.71 7.31 9.14 5.38 12 5.38z" />
             </svg>
-            Continue with Google
+            {t("auth.continueWithGoogle")}
           </button>
 
           <div className="my-6 flex items-center gap-3">
             <div className="h-px flex-1 bg-zinc-200" />
-            <span className="text-[10px] uppercase tracking-widest text-zinc-400 font-mono">or with email</span>
+            <span className="text-[10px] uppercase tracking-widest text-zinc-400 font-mono">{t("auth.orWithEmail")}</span>
             <div className="h-px flex-1 bg-zinc-200" />
           </div>
 
           <form onSubmit={onSubmit} className="space-y-5" data-testid="login-form">
             <div className="space-y-2">
-              <Label htmlFor="email" className="text-xs uppercase tracking-wider text-zinc-500 font-mono">Email</Label>
+              <Label htmlFor="email" className="text-xs uppercase tracking-wider text-zinc-500 font-mono">{t("common.email")}</Label>
               <Input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required data-testid="login-email-input" />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="password" className="text-xs uppercase tracking-wider text-zinc-500 font-mono">Password</Label>
+              <Label htmlFor="password" className="text-xs uppercase tracking-wider text-zinc-500 font-mono">{t("auth.password")}</Label>
               <Input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required data-testid="login-password-input" />
             </div>
 
@@ -89,22 +93,21 @@ export default function Login() {
             )}
 
             <Button type="submit" disabled={loading} className="w-full" data-testid="login-submit-button">
-              {loading ? "Signing in…" : "Sign in"} <ArrowRight className="ml-2 size-4" />
+              {loading ? t("auth.signingIn") : t("auth.signIn")} <ArrowRight className="ml-2 size-4" />
             </Button>
           </form>
 
           <p className="mt-8 text-sm text-zinc-500">
-            New here? <Link to="/register" className="text-zinc-900 font-medium hover:underline" data-testid="goto-register-link">Create an account</Link>
+            {t("auth.newHere")} <Link to="/register" className="text-zinc-900 font-medium hover:underline" data-testid="goto-register-link">{t("auth.createAccount")}</Link>
           </p>
 
           <div className="mt-12 rounded-lg border border-zinc-200 bg-zinc-50 p-4 font-mono text-xs text-zinc-600">
-            <div className="text-[10px] uppercase tracking-widest text-zinc-400 mb-1">Demo credentials</div>
+            <div className="text-[10px] uppercase tracking-widest text-zinc-400 mb-1">{t("auth.demoCredentials")}</div>
             admin@wagateway.com / admin123
           </div>
         </div>
       </div>
 
-      {/* Right: decorative */}
       <div className="hidden lg:block flex-1 relative overflow-hidden bg-zinc-900">
         <div className="absolute inset-0 bg-grain opacity-50" />
         <img

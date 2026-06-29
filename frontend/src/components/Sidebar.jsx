@@ -3,26 +3,28 @@ import {
   History, KeyRound, BookText, Settings, LogOut, Sparkles, Users
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import { useT } from "@/i18n/LanguageContext";
+import LanguageSwitcher from "@/components/LanguageSwitcher";
 import { NavLink, useNavigate } from "react-router-dom";
-
-const baseNav = [
-  { to: "/", label: "Dashboard", icon: LayoutDashboard, id: "nav-dashboard" },
-  { to: "/sessions", label: "Sessions", icon: Smartphone, id: "nav-sessions" },
-  { to: "/send", label: "Send Message", icon: Send, id: "nav-send" },
-  { to: "/broadcast", label: "Broadcast", icon: Megaphone, id: "nav-broadcast" },
-  { to: "/auto-reply", label: "Auto-Reply", icon: Bot, id: "nav-auto-reply" },
-  { to: "/history", label: "History", icon: History, id: "nav-history" },
-  { to: "/keys", label: "API Keys", icon: KeyRound, id: "nav-api-keys" },
-  { to: "/docs", label: "API Docs", icon: BookText, id: "nav-api-docs" },
-  { to: "/settings", label: "Settings", icon: Settings, id: "nav-settings" },
-];
-
-const adminNavItem = { to: "/admin/users", label: "User Approvals", icon: Users, id: "nav-admin-users" };
 
 export default function Sidebar() {
   const { user, logout } = useAuth();
+  const { t } = useT();
   const navigate = useNavigate();
-  const nav = user?.role === "admin" ? [...baseNav.slice(0,6), adminNavItem, ...baseNav.slice(6)] : baseNav;
+
+  const baseNav = [
+    { to: "/", label: t("nav.dashboard"), icon: LayoutDashboard, id: "nav-dashboard" },
+    { to: "/sessions", label: t("nav.sessions"), icon: Smartphone, id: "nav-sessions" },
+    { to: "/send", label: t("nav.send"), icon: Send, id: "nav-send" },
+    { to: "/broadcast", label: t("nav.broadcast"), icon: Megaphone, id: "nav-broadcast" },
+    { to: "/auto-reply", label: t("nav.autoReply"), icon: Bot, id: "nav-auto-reply" },
+    { to: "/history", label: t("nav.history"), icon: History, id: "nav-history" },
+    { to: "/keys", label: t("nav.apiKeys"), icon: KeyRound, id: "nav-api-keys" },
+    { to: "/docs", label: t("nav.apiDocs"), icon: BookText, id: "nav-api-docs" },
+    { to: "/settings", label: t("nav.settings"), icon: Settings, id: "nav-settings" },
+  ];
+  const adminNavItem = { to: "/admin/users", label: t("nav.userApprovals"), icon: Users, id: "nav-admin-users" };
+  const nav = user?.role === "admin" ? [...baseNav.slice(0, 6), adminNavItem, ...baseNav.slice(6)] : baseNav;
 
   return (
     <aside className="w-64 shrink-0 border-r border-zinc-200 bg-white/70 backdrop-blur-md flex flex-col" data-testid="sidebar">
@@ -57,7 +59,10 @@ export default function Sidebar() {
         ))}
       </nav>
 
-      <div className="border-t border-zinc-200 px-3 py-3">
+      <div className="border-t border-zinc-200 px-3 py-3 space-y-2">
+        <div className="flex justify-end px-2">
+          <LanguageSwitcher compact />
+        </div>
         <div className="flex items-center gap-3 px-2 py-2">
           <div className="size-8 rounded-full bg-zinc-900 text-white grid place-items-center text-xs font-semibold">
             {(user?.name || "U").slice(0,1).toUpperCase()}
@@ -70,7 +75,7 @@ export default function Sidebar() {
             data-testid="logout-button"
             onClick={() => { logout(); navigate("/login"); }}
             className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 transition-colors"
-            title="Logout"
+            title={t("auth.logout")}
           >
             <LogOut className="size-4" strokeWidth={1.75} />
           </button>

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
+import { useT } from "@/i18n/LanguageContext";
 import { Smartphone, Send, CheckCircle2, AlertTriangle, TrendingUp } from "lucide-react";
 import { LineChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid } from "recharts";
 
@@ -17,6 +18,7 @@ function Metric({ icon: Icon, label, value, hint, testId }) {
 }
 
 export default function Dashboard() {
+  const { t } = useT();
   const [stats, setStats] = useState(null);
 
   useEffect(() => {
@@ -26,28 +28,28 @@ export default function Dashboard() {
   return (
     <div className="space-y-8 fade-up" data-testid="dashboard-page">
       <div>
-        <h1 className="text-3xl md:text-4xl font-bold tracking-tight">Dashboard</h1>
-        <p className="mt-2 text-sm text-zinc-500">Operational overview of your WhatsApp gateway.</p>
+        <h1 className="text-3xl md:text-4xl font-bold tracking-tight">{t("dashboard.title")}</h1>
+        <p className="mt-2 text-sm text-zinc-500">{t("dashboard.subtitle")}</p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Metric icon={Smartphone} label="Active Sessions" testId="metric-active-sessions"
+        <Metric icon={Smartphone} label={t("dashboard.activeSessions")} testId="metric-active-sessions"
           value={stats ? `${stats.connected_sessions}/${stats.total_sessions}` : "—"}
-          hint="connected of total" />
-        <Metric icon={Send} label="Sent Today" testId="metric-sent-today"
-          value={stats ? stats.today_messages : "—"} hint="outbound messages" />
-        <Metric icon={CheckCircle2} label="Success Rate" testId="metric-success-rate"
-          value={stats ? `${stats.success_rate}%` : "—"} hint="all-time delivery" />
-        <Metric icon={AlertTriangle} label="Failed" testId="metric-failed"
-          value={stats ? stats.failed_messages : "—"} hint="cumulative failures" />
+          hint={t("dashboard.connectedOfTotal")} />
+        <Metric icon={Send} label={t("dashboard.sentToday")} testId="metric-sent-today"
+          value={stats ? stats.today_messages : "—"} hint={t("dashboard.outboundMessages")} />
+        <Metric icon={CheckCircle2} label={t("dashboard.successRate")} testId="metric-success-rate"
+          value={stats ? `${stats.success_rate}%` : "—"} hint={t("dashboard.allTimeDelivery")} />
+        <Metric icon={AlertTriangle} label={t("dashboard.failed")} testId="metric-failed"
+          value={stats ? stats.failed_messages : "—"} hint={t("dashboard.cumulativeFailures")} />
       </div>
 
       <div className="bg-white border border-zinc-200 rounded-xl p-6" data-testid="chart-7day">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <div className="text-xs uppercase tracking-widest text-zinc-500 font-mono">Messages — last 7 days</div>
+            <div className="text-xs uppercase tracking-widest text-zinc-500 font-mono">{t("dashboard.last7Days")}</div>
             <div className="mt-1 text-xl font-semibold tracking-tight">
-              {stats ? stats.series.reduce((a, b) => a + b.count, 0) : 0} <span className="text-sm text-zinc-500 font-normal">total</span>
+              {stats ? stats.series.reduce((a, b) => a + b.count, 0) : 0} <span className="text-sm text-zinc-500 font-normal">{t("common.total")}</span>
             </div>
           </div>
           <TrendingUp className="size-4 text-zinc-400" />
@@ -70,14 +72,14 @@ export default function Dashboard() {
 
       <div className="grid md:grid-cols-2 gap-4">
         <a href="/sessions" data-testid="quick-add-session" className="group bg-white border border-zinc-200 rounded-xl p-6 hover:border-zinc-300 transition-colors">
-          <div className="text-xs uppercase tracking-widest text-zinc-500 font-mono">Quick action</div>
-          <div className="mt-2 text-lg font-semibold">Add a new WhatsApp session</div>
-          <div className="mt-1 text-sm text-zinc-500">Scan QR to connect another number.</div>
+          <div className="text-xs uppercase tracking-widest text-zinc-500 font-mono">{t("dashboard.quickAction")}</div>
+          <div className="mt-2 text-lg font-semibold">{t("dashboard.addSession")}</div>
+          <div className="mt-1 text-sm text-zinc-500">{t("dashboard.scanQrConnect")}</div>
         </a>
         <a href="/docs" data-testid="quick-api-docs" className="group bg-zinc-900 text-white rounded-xl p-6 hover:bg-zinc-800 transition-colors">
-          <div className="text-xs uppercase tracking-widest text-zinc-400 font-mono">Build it</div>
-          <div className="mt-2 text-lg font-semibold">Integrate via REST API</div>
-          <div className="mt-1 text-sm text-zinc-400">curl-friendly endpoints with API keys.</div>
+          <div className="text-xs uppercase tracking-widest text-zinc-400 font-mono">{t("dashboard.buildIt")}</div>
+          <div className="mt-2 text-lg font-semibold">{t("dashboard.integrateRest")}</div>
+          <div className="mt-1 text-sm text-zinc-400">{t("dashboard.curlFriendly")}</div>
         </a>
       </div>
     </div>

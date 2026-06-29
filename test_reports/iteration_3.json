@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 3: i18n (ID + EN) verification. (1) /login defaults to Indonesian on first visit (no localStorage). All required headings render: 'Selamat datang kembali', 'Lanjutkan dengan Google', 'atau dengan email', 'Email', 'Kata sandi', 'Masuk'. (2) Login page language-toggle with ID/EN pills works: clicking EN switches to 'Welcome back', 'Continue with Google', 'or with email', 'Sign in', writes localStorage wag_lang=en. Persists after full page reload. Switching back to ID works. (3) Logged in as admin, sidebar in ID shows all 10 nav items including 'Persetujuan User'. After clicking compact language-switcher in sidebar, nav switches to EN with all 10 items including 'User Approvals'. (4) Settings page shows 'Bahasa' row in ID and 'Language' row in EN with the full ID/EN toggle. (5) Scanned innerText on every page (Dashboard, Sessions, Send Message, Broadcast, Auto-Reply, History, API Keys, API Docs, Settings, Admin Users) in BOTH languages with regex matching common/nav/login/register/dashboard/sessions/send/broadcast/autoReply/history/apiKeys/apiDocs/settings/admin prefixed keys -- ZERO raw keys leaked anywhere. (6) Admin Users tabs: EN shows Pending/Active/All; ID shows Menunggu/Aktif/Semua. (7) Regression: created TEST_i18n_session -> QR dialog renders canvas, session appears in list; generated TEST_i18n_key -> 'Save your key' / 'Copy key' dialog shows full key with wag_ prefix. (8) ZERO console errors across all navigation. (9) Backend pytest: 30/31 pass; the only failure is the same pre-existing flaky TestAutoReply.test_rule_crud_and_simulate from iteration 2 (stale 'contains' rules in DB match before the freshly-created rule) -- not caused by i18n changes.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/auto-reply/simulate", "issue": "Pre-existing flaky test from iteration 1/2 -- stale 'contains' rules in DB match before newly-created rule. Test-side issue (not i18n related). Recommend prefixing test keyword with unique UUID or pre-deleting user's existing rules in test setup."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard", "issues": ["Recharts logs warning: 'width(-1) and height(-1) of chart should be greater than 0' on initial mount; chart still renders correctly. Same cosmetic console noise as iteration 2 -- unrelated to i18n."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_admin_approval.py",
+    "/app/test_reports/pytest/iteration_3.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: De-dupe stale auto-reply rules in dev DB or prefix simulate test keyword with a UUID to stop the iteration-1 flaky test (carried over from iteration 2).",
+    "OPTIONAL (cosmetic): Suppress the Recharts width/height warning on Dashboard mount by setting an explicit min-height on the ResponsiveContainer parent."
+  ],
+  "critical_code_review_comments": [
+    "LanguageContext.jsx L7-12: initial-lang IIFE reads localStorage during render which works in CSR but would throw under SSR. Acceptable for this CRA SPA -- no SSR. Good default-to-id behaviour.",
+    "LanguageContext.jsx L21-29: t() falls back to EN dictionary then to fallback then to the key itself. Means a typo in a key would render the literal key string in UI -- which is exactly why we scanned for raw 'prefix.key' patterns. None leaked, so translations.js is complete for both languages.",
+    "LanguageSwitcher.jsx L23: data-testid='language-toggle' is reused on BOTH the login page AND the settings page. Playwright .first/.last works around it, but adding distinct testids (e.g., 'language-toggle-login' vs 'language-toggle-settings') would be cleaner for future tests.",
+    "Sidebar.jsx still splices admin nav at fixed index between /history and /keys (carried over from iteration 2). Same brittleness comment applies.",
+    "i18n state is held in-memory (useState + localStorage). It does NOT broadcast across browser tabs -- changing language in tab A will not update tab B until tab B reloads. Acceptable; mention if multi-tab UX is later required.",
+    "translations.js is 522 lines and growing. Once it crosses ~700 lines, consider splitting into per-namespace files (translations/common.js, translations/sessions.js, etc.) and merging at module load."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "97% (30/31; only pre-existing flaky test fails)", "frontend": "100% (i18n verified across all 10 pages + dialogs + tabs in both ID and EN; zero raw keys leaked; zero console errors)"},
+  "test_credentials": "admin@wagateway.com / admin123 (seeded). Verified working in both languages.",
+  "seed_data_creation": "Created TEST_i18n_session (Sessions list) and TEST_i18n_key (API Keys) during regression flow. Both via UI flows logged in as admin. No DB-direct inserts.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "i18n is implemented via /app/frontend/src/i18n/LanguageContext.jsx (useT() hook, t(key,fallback) function) and translations.js (dict for en + id). data-testids: language-toggle (full pill toggle, present on /login and /settings), language-switcher (compact globe-icon button, present in sidebar), lang-id / lang-en (individual pills inside language-toggle). localStorage key: wag_lang ('id'|'en'), defaults to 'id' on first visit. To verify no raw keys leak, scan document.body.innerText for /\\b(common|nav|login|register|dashboard|sessions|send|broadcast|autoReply|history|apiKeys|apiDocs|settings|admin)\\.[a-zA-Z_][a-zA-Z_0-9.]*\\b/. All 10 pages and their dialogs/tabs are clean in both langs as of this iteration.",
+  "rca_of_remaining_flaky_test": "TestAutoReply.test_rule_crud_and_simulate -- same RCA as iteration 2. Multiple stale 'contains'-type rules exist for the admin user in MongoDB. The simulate endpoint iterates rules and returns the first match, which happens to be a leftover from previous test runs whose id != the freshly-created rule's id. Backend logic is correct -- this is a test-data hygiene issue. Mitigation: in test_rule_crud_and_simulate, either (a) DELETE all existing auto-reply rules for the user in setUp, or (b) make the rule keyword unique per run, e.g. f'TEST_{uuid4().hex[:8]}_hello'."
+}

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import api from "@/lib/api";
+import { useT } from "@/i18n/LanguageContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -10,6 +11,7 @@ import { KeyRound, Plus, Copy, Trash2, Check } from "lucide-react";
 import { toast } from "sonner";
 
 export default function ApiKeys() {
+  const { t } = useT();
   const [keys, setKeys] = useState([]);
   const [open, setOpen] = useState(false);
   const [label, setLabel] = useState("");
@@ -34,11 +36,11 @@ export default function ApiKeys() {
     await navigator.clipboard.writeText(k);
     setCopied(id);
     setTimeout(() => setCopied(null), 1500);
-    toast.message("Copied to clipboard");
+    toast.message(t("common.copied"));
   };
 
   const revoke = async (id) => {
-    if (!confirm("Revoke this key?")) return;
+    if (!confirm(t("apiKeys.revokeConfirm"))) return;
     await api.delete(`/api-keys/${id}`); refresh();
   };
 
@@ -46,28 +48,28 @@ export default function ApiKeys() {
     <div className="space-y-8 fade-up" data-testid="api-keys-page">
       <div className="flex items-end justify-between gap-4">
         <div>
-          <h1 className="text-3xl md:text-4xl font-bold tracking-tight">API Keys</h1>
-          <p className="mt-2 text-sm text-zinc-500">Use these keys to call the WA Gateway REST API from your own services.</p>
+          <h1 className="text-3xl md:text-4xl font-bold tracking-tight">{t("apiKeys.title")}</h1>
+          <p className="mt-2 text-sm text-zinc-500">{t("apiKeys.subtitle")}</p>
         </div>
         <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) setNewKey(null); }}>
           <DialogTrigger asChild>
-            <Button data-testid="add-api-key-button"><Plus className="size-4 mr-2" /> Generate key</Button>
+            <Button data-testid="add-api-key-button"><Plus className="size-4 mr-2" /> {t("apiKeys.generate")}</Button>
           </DialogTrigger>
           <DialogContent data-testid="create-api-key-dialog">
             <DialogHeader>
-              <DialogTitle>{newKey ? "Save your key" : "Generate a new API key"}</DialogTitle>
+              <DialogTitle>{newKey ? t("apiKeys.saveTitle") : t("apiKeys.createTitle")}</DialogTitle>
               <DialogDescription>
-                {newKey ? "This is the only time the full key will be shown. Copy it now." : "Give your key a label so you remember where it's used."}
+                {newKey ? t("apiKeys.saveDesc") : t("apiKeys.createDesc")}
               </DialogDescription>
             </DialogHeader>
             {!newKey ? (
               <form onSubmit={create} className="space-y-4">
                 <div className="space-y-2">
-                  <Label className="text-xs uppercase tracking-wider text-zinc-500 font-mono">Label</Label>
-                  <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. Production server" required data-testid="api-key-label-input" />
+                  <Label className="text-xs uppercase tracking-wider text-zinc-500 font-mono">{t("apiKeys.label")}</Label>
+                  <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder={t("apiKeys.labelPlaceholder")} required data-testid="api-key-label-input" />
                 </div>
                 <DialogFooter>
-                  <Button type="submit" data-testid="api-key-create-submit">Generate</Button>
+                  <Button type="submit" data-testid="api-key-create-submit">{t("apiKeys.generate")}</Button>
                 </DialogFooter>
               </form>
             ) : (
@@ -76,7 +78,7 @@ export default function ApiKeys() {
                   {newKey.key}
                 </div>
                 <Button onClick={() => copy(newKey.key, "new")} className="w-full" data-testid="copy-new-key-button">
-                  {copied === "new" ? <><Check className="size-4 mr-2" /> Copied</> : <><Copy className="size-4 mr-2" /> Copy key</>}
+                  {copied === "new" ? <><Check className="size-4 mr-2" /> {t("common.copied")}</> : <><Copy className="size-4 mr-2" /> {t("apiKeys.copyKey")}</>}
                 </Button>
               </div>
             )}
@@ -87,19 +89,19 @@ export default function ApiKeys() {
       {keys.length === 0 ? (
         <div className="bg-white border border-dashed border-zinc-300 rounded-xl p-12 text-center">
           <KeyRound className="size-10 mx-auto text-zinc-400" />
-          <div className="mt-4 font-semibold">No API keys yet</div>
-          <div className="mt-1 text-sm text-zinc-500">Generate a key to call the REST API.</div>
+          <div className="mt-4 font-semibold">{t("apiKeys.noKeys")}</div>
+          <div className="mt-1 text-sm text-zinc-500">{t("apiKeys.noKeysSub")}</div>
         </div>
       ) : (
         <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-zinc-50">
               <tr className="text-left text-xs uppercase tracking-wider text-zinc-500 font-mono">
-                <th className="px-4 py-3">Label</th>
-                <th className="px-4 py-3">Key</th>
-                <th className="px-4 py-3">Created</th>
-                <th className="px-4 py-3">Last used</th>
-                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">{t("apiKeys.label")}</th>
+                <th className="px-4 py-3">{t("apiKeys.keyCol")}</th>
+                <th className="px-4 py-3">{t("common.created")}</th>
+                <th className="px-4 py-3">{t("apiKeys.lastUsed")}</th>
+                <th className="px-4 py-3">{t("common.status")}</th>
                 <th className="px-4 py-3"></th>
               </tr>
             </thead>
@@ -112,15 +114,15 @@ export default function ApiKeys() {
                   <td className="px-4 py-3 font-mono text-zinc-500 text-xs">{k.last_used_at ? new Date(k.last_used_at).toLocaleString() : "—"}</td>
                   <td className="px-4 py-3">
                     {k.revoked
-                      ? <span className="text-xs font-mono text-red-700">revoked</span>
-                      : <span className="text-xs font-mono text-emerald-700">active</span>}
+                      ? <span className="text-xs font-mono text-red-700">{t("apiKeys.revoked")}</span>
+                      : <span className="text-xs font-mono text-emerald-700">{t("apiKeys.active")}</span>}
                   </td>
                   <td className="px-4 py-3 text-right space-x-1">
-                    <button onClick={() => copy(k.key, k.id)} className="p-1.5 rounded hover:bg-zinc-100" title="Copy" data-testid={`copy-key-${k.id}`}>
+                    <button onClick={() => copy(k.key, k.id)} className="p-1.5 rounded hover:bg-zinc-100" title={t("common.copy")} data-testid={`copy-key-${k.id}`}>
                       {copied === k.id ? <Check className="size-4 text-emerald-700" /> : <Copy className="size-4 text-zinc-500" />}
                     </button>
                     {!k.revoked && (
-                      <button onClick={() => revoke(k.id)} className="p-1.5 rounded hover:bg-zinc-100" title="Revoke" data-testid={`revoke-key-${k.id}`}>
+                      <button onClick={() => revoke(k.id)} className="p-1.5 rounded hover:bg-zinc-100" title={t("common.delete")} data-testid={`revoke-key-${k.id}`}>
                         <Trash2 className="size-4 text-red-500" />
                       </button>
                     )}

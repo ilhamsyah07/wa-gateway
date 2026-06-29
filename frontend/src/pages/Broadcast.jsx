@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import api, { formatApiError } from "@/lib/api";
+import { useT } from "@/i18n/LanguageContext";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -10,6 +11,7 @@ import { Megaphone, Upload } from "lucide-react";
 import { toast } from "sonner";
 
 export default function Broadcast() {
+  const { t } = useT();
   const [sessions, setSessions] = useState([]);
   const [sessionId, setSessionId] = useState("");
   const [numbersText, setNumbersText] = useState("");
@@ -41,7 +43,7 @@ export default function Broadcast() {
     try {
       const { data } = await api.post("/messages/broadcast", { session_id: sessionId, numbers, message });
       setResult(data);
-      toast.success(`Broadcast complete: ${data.sent} sent, ${data.failed} failed`);
+      toast.success(`${t("broadcast.completeToast")}: ${data.sent} ${t("broadcast.sentLabel")}, ${data.failed} ${t("broadcast.failedLabel")}`);
     } catch (err) { toast.error(formatApiError(err?.response?.data?.detail)); }
     finally { setSending(false); }
   };
@@ -49,16 +51,16 @@ export default function Broadcast() {
   return (
     <div className="space-y-8 fade-up" data-testid="broadcast-page">
       <div>
-        <h1 className="text-3xl md:text-4xl font-bold tracking-tight">Broadcast</h1>
-        <p className="mt-2 text-sm text-zinc-500">Send the same message to many recipients at once.</p>
+        <h1 className="text-3xl md:text-4xl font-bold tracking-tight">{t("broadcast.title")}</h1>
+        <p className="mt-2 text-sm text-zinc-500">{t("broadcast.subtitle")}</p>
       </div>
 
       <form onSubmit={onSend} className="grid lg:grid-cols-2 gap-6">
         <div className="bg-white border border-zinc-200 rounded-xl p-6 space-y-5">
           <div className="space-y-2">
-            <Label className="text-xs uppercase tracking-wider text-zinc-500 font-mono">From session</Label>
+            <Label className="text-xs uppercase tracking-wider text-zinc-500 font-mono">{t("broadcast.fromSession")}</Label>
             <Select value={sessionId} onValueChange={setSessionId}>
-              <SelectTrigger data-testid="broadcast-session-select"><SelectValue placeholder="Select session" /></SelectTrigger>
+              <SelectTrigger data-testid="broadcast-session-select"><SelectValue placeholder={t("broadcast.selectSession")} /></SelectTrigger>
               <SelectContent>
                 {sessions.map((s) => <SelectItem key={s.id} value={s.id}>{s.name} <span className="font-mono text-zinc-500 ml-2">{s.phone_number}</span></SelectItem>)}
               </SelectContent>
@@ -66,45 +68,45 @@ export default function Broadcast() {
           </div>
 
           <div className="space-y-2">
-            <Label className="text-xs uppercase tracking-wider text-zinc-500 font-mono">Recipients</Label>
+            <Label className="text-xs uppercase tracking-wider text-zinc-500 font-mono">{t("broadcast.recipients")}</Label>
             <Textarea rows={6} value={numbersText} onChange={(e) => setNumbersText(e.target.value)} placeholder={"6281234567890\n6289876543210\n…"} className="font-mono text-sm" data-testid="numbers-textarea" />
             <div className="flex items-center justify-between text-xs">
               <label className="cursor-pointer inline-flex items-center gap-1.5 text-zinc-600 hover:text-zinc-900" data-testid="upload-csv-label">
                 <Upload className="size-3.5" />
-                <span>Upload CSV/TXT</span>
+                <span>{t("broadcast.uploadCsv")}</span>
                 <input type="file" accept=".csv,.txt" className="hidden" onChange={onFile} data-testid="upload-csv-input" />
               </label>
-              <span className="font-mono text-zinc-500" data-testid="recipients-count">{numbers.length} recipient(s)</span>
+              <span className="font-mono text-zinc-500" data-testid="recipients-count">{numbers.length} {t("broadcast.recipientsCount")}</span>
             </div>
           </div>
 
           <div className="space-y-2">
-            <Label className="text-xs uppercase tracking-wider text-zinc-500 font-mono">Message</Label>
+            <Label className="text-xs uppercase tracking-wider text-zinc-500 font-mono">{t("broadcast.messageLabel")}</Label>
             <Textarea rows={5} value={message} onChange={(e) => setMessage(e.target.value)} required data-testid="broadcast-message-input" />
           </div>
 
           <Button type="submit" disabled={sending || numbers.length === 0 || !sessionId} data-testid="broadcast-send-button">
-            <Megaphone className="size-4 mr-2" /> {sending ? "Sending…" : `Send to ${numbers.length} recipient(s)`}
+            <Megaphone className="size-4 mr-2" /> {sending ? t("send.sending") : `${t("broadcast.sendTo")} ${numbers.length} ${t("broadcast.recipientsCount")}`}
           </Button>
         </div>
 
         <div className="bg-white border border-zinc-200 rounded-xl p-6" data-testid="broadcast-results">
-          <div className="text-xs uppercase tracking-widest text-zinc-500 font-mono mb-3">Result</div>
+          <div className="text-xs uppercase tracking-widest text-zinc-500 font-mono mb-3">{t("broadcast.result")}</div>
           {!result ? (
-            <div className="text-sm text-zinc-500">Run a broadcast to see per-recipient results here.</div>
+            <div className="text-sm text-zinc-500">{t("broadcast.runToSee")}</div>
           ) : (
             <div className="space-y-3">
               <div className="grid grid-cols-3 gap-3">
                 <div className="bg-zinc-50 rounded-md p-3">
-                  <div className="text-xs text-zinc-500 font-mono">total</div>
+                  <div className="text-xs text-zinc-500 font-mono">{t("broadcast.totalLabel")}</div>
                   <div className="text-xl font-bold">{result.total}</div>
                 </div>
                 <div className="bg-emerald-50 rounded-md p-3">
-                  <div className="text-xs text-emerald-700 font-mono">sent</div>
+                  <div className="text-xs text-emerald-700 font-mono">{t("broadcast.sentLabel")}</div>
                   <div className="text-xl font-bold text-emerald-700">{result.sent}</div>
                 </div>
                 <div className="bg-red-50 rounded-md p-3">
-                  <div className="text-xs text-red-700 font-mono">failed</div>
+                  <div className="text-xs text-red-700 font-mono">{t("broadcast.failedLabel")}</div>
                   <div className="text-xl font-bold text-red-700">{result.failed}</div>
                 </div>
               </div>
@@ -112,7 +114,7 @@ export default function Broadcast() {
                 <table className="w-full text-sm">
                   <thead className="bg-zinc-50 sticky top-0">
                     <tr className="text-left text-xs uppercase tracking-wider text-zinc-500 font-mono">
-                      <th className="px-3 py-2">To</th><th className="px-3 py-2">Status</th>
+                      <th className="px-3 py-2">{t("broadcast.to")}</th><th className="px-3 py-2">{t("broadcast.status")}</th>
                     </tr>
                   </thead>
                   <tbody>
