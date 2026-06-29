@@ -1,11 +1,11 @@
-import { NavLink, useNavigate } from "react-router-dom";
-import { useAuth } from "@/contexts/AuthContext";
 import {
   LayoutDashboard, Smartphone, Send, Megaphone, Bot,
-  History, KeyRound, BookText, Settings, LogOut, Sparkles
+  History, KeyRound, BookText, Settings, LogOut, Sparkles, Users
 } from "lucide-react";
+import { useAuth } from "@/contexts/AuthContext";
+import { NavLink, useNavigate } from "react-router-dom";
 
-const nav = [
+const baseNav = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, id: "nav-dashboard" },
   { to: "/sessions", label: "Sessions", icon: Smartphone, id: "nav-sessions" },
   { to: "/send", label: "Send Message", icon: Send, id: "nav-send" },
@@ -17,9 +17,12 @@ const nav = [
   { to: "/settings", label: "Settings", icon: Settings, id: "nav-settings" },
 ];
 
+const adminNavItem = { to: "/admin/users", label: "User Approvals", icon: Users, id: "nav-admin-users" };
+
 export default function Sidebar() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const nav = user?.role === "admin" ? [...baseNav.slice(0,6), adminNavItem, ...baseNav.slice(6)] : baseNav;
 
   return (
     <aside className="w-64 shrink-0 border-r border-zinc-200 bg-white/70 backdrop-blur-md flex flex-col" data-testid="sidebar">

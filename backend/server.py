@@ -18,6 +18,7 @@ from typing import List, Optional, Dict, Any
 import bcrypt
 import jwt
 import qrcode
+import httpx
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Header, UploadFile, File, Form
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
@@ -83,8 +84,16 @@ async def get_current_user(
     user = await db.users.find_one({"id": payload["sub"]})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    if user.get("status", "active") != "active":
+        raise HTTPException(status_code=403, detail="Account awaiting admin approval")
     user.pop("password_hash", None)
     user.pop("_id", None)
+    return user
+
+
+async def require_admin(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
     return user
 
 async def get_user_by_api_key(x_api_key: Optional[str] = Header(None)) -> Dict[str, Any]:
@@ -123,6 +132,9 @@ class RegisterReq(BaseModel):
 class LoginReq(BaseModel):
     email: EmailStr
     password: str
+
+class GoogleSessionReq(BaseModel):
+    session_id: str
 
 class SessionCreateReq(BaseModel):
     name: str
@@ -177,12 +189,17 @@ async def startup():
             "email": admin_email,
             "name": "Admin",
             "role": "admin",
+            "status": "active",
+            "auth_provider": "password",
             "password_hash": hash_password(admin_password),
             "created_at": now_iso(),
         })
         logger.info("Seeded admin user %s", admin_email)
     elif not verify_password(admin_password, existing["password_hash"]):
         await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_password)}})
+    # Backfill status / auth_provider on existing users (idempotent)
+    await db.users.update_many({"status": {"$exists": False}}, {"$set": {"status": "active"}})
+    await db.users.update_many({"auth_provider": {"$exists": False}}, {"$set": {"auth_provider": "password"}})
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -200,6 +217,8 @@ async def register(req: RegisterReq):
         "email": email,
         "name": req.name.strip(),
         "role": "user",
+        "status": "active",
+        "auth_provider": "password",
         "password_hash": hash_password(req.password),
         "created_at": now_iso(),
     }
@@ -213,12 +232,104 @@ async def register(req: RegisterReq):
 async def login(req: LoginReq):
     email = req.email.lower().strip()
     user = await db.users.find_one({"email": email})
-    if not user or not verify_password(req.password, user["password_hash"]):
+    if not user or not user.get("password_hash") or not verify_password(req.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    if user.get("status", "active") != "active":
+        raise HTTPException(status_code=403, detail="Account awaiting admin approval")
     token = create_access_token(user["id"], user["email"])
     user.pop("password_hash", None)
     user.pop("_id", None)
     return {"user": user, "access_token": token, "token_type": "bearer"}
+
+
+# ------------------ Google Auth (Emergent-managed) ------------------
+
+EMERGENT_SESSION_DATA_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
+
+@api_router.post("/auth/google/session")
+async def google_session(req: GoogleSessionReq):
+    """Exchange Emergent session_id for our JWT.
+    REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
+    """
+    async with httpx.AsyncClient(timeout=10) as http:
+        try:
+            r = await http.get(EMERGENT_SESSION_DATA_URL, headers={"X-Session-ID": req.session_id})
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"Auth provider unreachable: {e}")
+    if r.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid or expired Google session")
+    data = r.json()
+    email = (data.get("email") or "").lower().strip()
+    name = data.get("name") or email.split("@")[0]
+    picture = data.get("picture")
+    if not email:
+        raise HTTPException(status_code=400, detail="Google did not return an email")
+
+    user = await db.users.find_one({"email": email})
+    if not user:
+        # First time Google sign-in — create as pending, require admin approval
+        user = {
+            "id": new_id(),
+            "email": email,
+            "name": name,
+            "picture": picture,
+            "role": "user",
+            "status": "pending",
+            "auth_provider": "google",
+            "created_at": now_iso(),
+        }
+        await db.users.insert_one(user)
+        raise HTTPException(status_code=403, detail="Account created. Awaiting admin approval before you can sign in.")
+
+    if user.get("status", "active") != "active":
+        raise HTTPException(status_code=403, detail="Account awaiting admin approval")
+
+    # Update profile fields from Google if changed
+    update = {}
+    if name and user.get("name") != name:
+        update["name"] = name
+    if picture and user.get("picture") != picture:
+        update["picture"] = picture
+    if update:
+        await db.users.update_one({"id": user["id"]}, {"$set": update})
+        user.update(update)
+
+    token = create_access_token(user["id"], user["email"])
+    user.pop("password_hash", None)
+    user.pop("_id", None)
+    return {"user": user, "access_token": token, "token_type": "bearer"}
+
+
+# ------------------ Admin: user approval ------------------
+
+@api_router.get("/admin/users")
+async def admin_list_users(status: Optional[str] = None, admin=Depends(require_admin)):
+    q: Dict[str, Any] = {}
+    if status:
+        q["status"] = status
+    cursor = db.users.find(q, {"password_hash": 0}).sort("created_at", -1)
+    items = []
+    async for d in cursor:
+        d.pop("_id", None)
+        items.append(d)
+    return items
+
+@api_router.post("/admin/users/{user_id}/approve")
+async def admin_approve_user(user_id: str, admin=Depends(require_admin)):
+    res = await db.users.update_one({"id": user_id}, {"$set": {"status": "active", "approved_at": now_iso(), "approved_by": admin["id"]}})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"ok": True}
+
+@api_router.post("/admin/users/{user_id}/reject")
+async def admin_reject_user(user_id: str, admin=Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.get("role") == "admin":
+        raise HTTPException(status_code=400, detail="Cannot reject an admin")
+    await db.users.delete_one({"id": user_id})
+    return {"ok": True}
 
 @api_router.get("/auth/me")
 async def me(user: Dict[str, Any] = Depends(get_current_user)):

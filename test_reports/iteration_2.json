@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration 2 focused on Google Auth + admin approval functionality. Backend: 15/15 new tests pass (admin login, /auth/me, register creates active user, /auth/google/session invalid path -> 401, /auth/google/session missing body -> 422, /admin/users RBAC (admin OK, non-admin 403, unauthenticated 401), status=pending filter, pending JWT blocked with 403 'awaiting admin approval', approve/reject endpoints, reject-admin 400, 404s). Frontend: Google button present on login, admin sees 'User Approvals' nav, AdminUsers page renders with Pending/Active/All tabs, non-admin user does NOT see admin nav, email/password login + register flow works end-to-end. Regression of iteration-1 suite still 30/31 passing (1 flaky auto-reply test failed due to leftover 'contains' rules in DB matching wrong rule first — not a new regression).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/auth/google/session", "issue": "Real Emergent /session-data exchange NOT tested end-to-end (would need real Google sign-in). Only invalid session_id (401) and missing body (422) paths verified. Approval state-machine verified by directly inserting a pending google user in MongoDB and approving via /api/admin/users/{id}/approve — flips status to 'active', adds approved_at and approved_by fields."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard", "issues": ["Recharts logs warning: 'width(-1) and height(-1) of chart should be greater than 0' — happens briefly on initial mount; chart still renders. Cosmetic console noise only."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_admin_approval.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/test_reports/pytest/test_admin_approval.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: When the real Emergent session_id round-trip is exercised in production, monitor /api/auth/google/session for 502s on httpx errors (current code raises 502 'Auth provider unreachable').",
+    "OPTIONAL: De-dupe stale auto-reply rules in the dev DB so the iteration-1 simulate test stops being flaky (it currently matches the first 'contains' rule in DB which may be an older one)."
+  ],
+  "critical_code_review_comments": [
+    "server.py L237-238: login() returns 403 if user.status != active. Good — this stops a pending user (e.g., one previously created via Google) from later setting a password and logging in. However, registration always sets status=active, so a Google-pending user could in theory be 'activated' by hitting /auth/register with the same email — but find_one short-circuits with 'Email already registered'. Safe.",
+    "server.py L88: get_current_user denies status != 'active' with 403 — but it falls back to 'active' if the field is missing. Backfill on startup covers this idempotently. Good.",
+    "server.py L25-36: load_dotenv is called at top via Path(__file__).parent — correct.",
+    "server.py L247: EMERGENT_SESSION_DATA_URL is a hardcoded constant inside the module. The reminder comment says 'DO NOT HARDCODE THE URL' — the URL itself is intentionally fixed (Emergent provider). Consider promoting to env var to silence the contradiction, but functionally correct.",
+    "Login.jsx L33-36: onGoogle hardcodes https://auth.emergentagent.com — fine, that is the Emergent OAuth entry per Emergent google auth playbook. redirect URL uses window.location.origin + '/' which is correct.",
+    "AdminUsers.jsx: approve/reject buttons do not show a loading state and don't disable while the POST is in-flight — quick double-clicks could fire twice (backend is idempotent for approve, but reject would 404 the second call).",
+    "AdminUsers.jsx L29: reject uses window.confirm() — works but not consistent with the rest of the app (which uses sonner toasts / shadcn AlertDialog). Cosmetic.",
+    "Sidebar.jsx L25: admin nav is spliced at index 6 (between /history and /keys). The mapping logic with slice(0,6)/slice(6) is correct but brittle — a future re-order of baseNav will silently move the admin item.",
+    "AuthContext likely calls /auth/me on every mount; with the new 403 gate (status != active) the front-end must handle 403 specifically (not treat it like 401 and clear token) so the user sees the pending-approval message. Not tested in this iteration — main agent should confirm AuthCallback.jsx surfaces the 403 detail."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_admin_approval.py (new — 15 tests)"
+  ],
+  "success_rate": {
+    "backend": "100% (15/15 new tests + 30/31 regression — 1 pre-existing flaky)",
+    "frontend": "100% (all new flows verified: Google button visible, admin nav gating, AdminUsers page + tabs, non-admin login, regression nav links)"
+  },
+  "test_credentials": "admin@wagateway.com / admin123 (seeded). Verified working.",
+  "seed_data_creation": "Created a pending Google user directly in MongoDB (status='pending', auth_provider='google') inside test fixtures, then approved/rejected via the admin API and verified DB state. Cleaned up via fixture teardown. Test users prefixed with test_nonadmin_, test_reg_, gtest_.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "New test file /app/backend/tests/test_admin_approval.py covers the Google + admin approval contract. The real Emergent /session-data round-trip cannot be exercised without a real Google sign-in — only the invalid path and the pending->approve state machine are verified. data-testids on the new pages: google-signin-button, nav-admin-users, admin-users-page, tab-pending/tab-active/tab-all, user-row-{id}, approve-{id}, reject-{id}. Frontend routes /keys (API Keys) and /docs (API Docs) are now used instead of /api-keys and /api-docs (fix from iteration 1 — verified working).",
+  "rca_of_remaining_flaky_test": "TestAutoReply.test_rule_crud_and_simulate failed once in regression: matched_rule.id did not equal the rule it just created because the user (admin) has multiple stale 'contains'-type rules in the DB from prior test runs and the loop picks whichever matches first in cursor order. Fix: either prefix the test keyword with a unique token (e.g. f'TEST_{uuid}_hello') or have the test pre-delete all existing rules for the user. Test-side issue only, not a backend bug."
+}

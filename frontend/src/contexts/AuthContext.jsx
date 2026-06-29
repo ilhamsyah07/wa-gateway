@@ -20,7 +20,12 @@ export function AuthProvider({ children }) {
     }
   }, []);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    // CRITICAL: If returning from OAuth callback, skip the /me check.
+    // AuthCallback will exchange the session_id and establish the session first.
+    if (window.location.hash?.includes("session_id=")) { setUser(null); return; }
+    refresh();
+  }, [refresh]);
 
   const login = async (email, password) => {
     const { data } = await api.post("/auth/login", { email, password });
@@ -45,7 +50,7 @@ export function AuthProvider({ children }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, login, register, logout, refresh }}>
+    <AuthContext.Provider value={{ user, login, register, logout, refresh, setUserDirect: setUser }}>
       {children}
     </AuthContext.Provider>
   );
