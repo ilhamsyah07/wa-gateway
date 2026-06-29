@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   mongo:
     image: mongo:7
@@ -7,6 +9,12 @@ services:
       - mongo_data:/data/db
     networks:
       - wagw
+    # Bagus ditambahkan biar backend ga kecepetan connect saat mongo baru booting
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
 
   baileys:
     build: ./baileys-service
@@ -15,21 +23,21 @@ services:
     environment:
       PORT: "3001"
       AUTH_DIR: /data/sessions
-      WEBHOOK_URL: http://backend:8001/api/webhook/baileys
+      WEBHOOK_URL: http://backend:8001/api/webhook/baileys # Pastikan backend portnya 8001
       SHARED_TOKEN: ${BAILEYS_TOKEN}
       LOG_LEVEL: info
     volumes:
       - baileys_data:/data
     networks:
       - wagw
-    depends_on:
-      - backend  # webhook target must be up first
+    # Hapus depends_on ke backend untuk menghindari circular dependency/stuck
 
   backend:
     build: ./backend
     container_name: wagw-backend
     restart: unless-stopped
     environment:
+      PORT: "8001" # Definisikan explisit port backendnya bro
       MONGO_URL: mongodb://mongo:27017
       DB_NAME: ${DB_NAME:-wa_gateway_db}
       JWT_SECRET: ${JWT_SECRET}
@@ -45,7 +53,8 @@ services:
     networks:
       - wagw
     depends_on:
-      - mongo
+      mongo:
+        condition: service_healthy # Nunggu mongo bener-bener siap, bukan asal hidup
 
   frontend:
     build:
