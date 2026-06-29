@@ -1,0 +1,1055 @@
+from dotenv import load_dotenv
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / ".env")
+
+import os
+import io
+import uuid
+import base64
+import hashlib
+import logging
+import secrets
+import asyncio
+import random
+from datetime import datetime, timezone, timedelta
+from typing import List, Optional, Dict, Any
+
+import bcrypt
+import jwt
+import qrcode
+import httpx
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Header, UploadFile, File, Form
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, Field, EmailStr, ConfigDict, field_validator
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+# ------------------ Setup ------------------
+
+MONGO_URL = os.environ["MONGO_URL"]
+DB_NAME = os.environ["DB_NAME"]
+JWT_SECRET = os.environ["JWT_SECRET"]
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = int(os.environ.get("JWT_EXPIRE_HOURS", "24"))
+
+BAILEYS_URL = os.environ.get("BAILEYS_URL", "").rstrip("/")
+BAILEYS_TOKEN = os.environ.get("BAILEYS_TOKEN", "")
+USE_REAL_BAILEYS = bool(BAILEYS_URL)
+
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+RESEND_FROM = os.environ.get("RESEND_FROM", "WA Gateway <onboarding@resend.dev>")
+APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "http://localhost:3000")
+
+client = AsyncIOMotorClient(MONGO_URL)
+db = client[DB_NAME]
+
+limiter = Limiter(key_func=lambda request: (request.headers.get("x-forwarded-for", "").split(",")[0].strip() or get_remote_address(request)), default_limits=[])
+
+app = FastAPI(title="WA Gateway API", version="1.0.0")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+api_router = APIRouter(prefix="/api")
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("wa-gateway")
+
+bearer_scheme = HTTPBearer(auto_error=False)
+
+# ------------------ Helpers ------------------
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def new_id() -> str:
+    return str(uuid.uuid4())
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+def verify_password(plain: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
+
+def create_access_token(user_id: str, email: str) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": user_id,
+        "email": email,
+        "iat": now,
+        "exp": now + timedelta(hours=JWT_EXPIRE_HOURS),
+        "type": "access",
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def hash_api_key(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+def sanitize_phone_number(phone: str) -> str:
+    """Mengubah format nomor HP menjadi standard internasional e.g. 0812 -> 62812"""
+    cleaned = "".join(filter(str.isdigit, phone))
+    if cleaned.startswith("0"):
+        cleaned = "62" + cleaned[1:]
+    return cleaned
+
+# ------------------ Email (Resend) ------------------
+
+async def send_email(to: str, subject: str, html: str) -> bool:
+    if not RESEND_API_KEY:
+        logger.info("[email no-op] to=%s subject=%s (RESEND_API_KEY not set)", to, subject)
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            r = await http.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+                json={"from": RESEND_FROM, "to": [to], "subject": subject, "html": html},
+            )
+        if r.status_code >= 400:
+            logger.warning("Resend error %s: %s", r.status_code, r.text)
+            return False
+        return True
+    except Exception as e:
+        logger.warning("Resend exception: %s", e)
+        return False
+
+def _email_template(title: str, intro: str, button_text: Optional[str] = None, button_url: Optional[str] = None, footer: str = "") -> str:
+    btn = ""
+    if button_text and button_url:
+        btn = f'<a href="{button_url}" style="display:inline-block;padding:12px 24px;background:#18181b;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;font-size:14px;font-family:system-ui,-apple-system,sans-serif">{button_text}</a>'
+    return f"""
+    <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto;padding:32px;color:#18181b">
+      <div style="font-size:14px;color:#71717a;letter-spacing:0.06em;text-transform:uppercase;font-family:ui-monospace,SFMono-Regular,monospace;margin-bottom:24px">WA Gateway</div>
+      <h1 style="font-size:24px;margin:0 0 16px;font-weight:700;letter-spacing:-0.02em">{title}</h1>
+      <p style="font-size:15px;line-height:1.6;color:#52525b;margin:0 0 24px">{intro}</p>
+      {btn}
+      <p style="font-size:12px;color:#a1a1aa;margin:32px 0 0">{footer}</p>
+    </div>
+    """
+
+async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)) -> Dict[str, Any]:
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    if payload.get("type") != "access":
+        raise HTTPException(status_code=401, detail="Invalid token type")
+    user = await db.users.find_one({"id": payload["sub"]})
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    if user.get("status", "active") != "active":
+        raise HTTPException(status_code=403, detail="Account awaiting admin approval")
+    user.pop("password_hash", None)
+    user.pop("_id", None)
+    return user
+
+async def require_admin(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+async def get_user_by_api_key(x_api_key: Optional[str] = Header(None)) -> Dict[str, Any]:
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="Missing X-API-Key header")
+    key_hash = hash_api_key(x_api_key)
+    key_doc = await db.api_keys.find_one({"key_hash": key_hash, "revoked": False})
+    if not key_doc:
+        raise HTTPException(status_code=401, detail="Invalid or revoked API key")
+    user = await db.users.find_one({"id": key_doc["user_id"]})
+    if not user or user.get("status", "active") != "active":
+        raise HTTPException(status_code=401, detail="User not found or inactive")
+    await db.api_keys.update_one({"id": key_doc["id"]}, {"$set": {"last_used_at": now_iso()}})
+    user.pop("password_hash", None)
+    user.pop("_id", None)
+    return user
+
+def make_qr_data_url(payload: str) -> str:
+    img = qrcode.make(payload)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+# ------------------ Baileys client (proxy to Node microservice) ------------------
+
+async def _baileys_request(method: str, path: str, json: Optional[Dict[str, Any]] = None):
+    headers = {"X-Internal-Token": BAILEYS_TOKEN} if BAILEYS_TOKEN else {}
+    async with httpx.AsyncClient(timeout=20) as http:
+        r = await http.request(method, f"{BAILEYS_URL}{path}", json=json, headers=headers)
+    return r
+
+async def baileys_connect(session_id: str) -> Dict[str, Any]:
+    r = await _baileys_request("POST", f"/sessions/{session_id}/connect")
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Baileys service error: {r.text}")
+    return r.json()
+
+async def baileys_get(session_id: str) -> Optional[Dict[str, Any]]:
+    r = await _baileys_request("GET", f"/sessions/{session_id}")
+    if r.status_code == 404:
+        return None
+    if r.status_code != 200:
+        return None
+    return r.json()
+
+async def baileys_send(session_id: str, to: str, message: str,
+                       media_url: Optional[str] = None, media_type: Optional[str] = None) -> Dict[str, Any]:
+    body = {"to": to, "message": message}
+    if media_url:
+        body["mediaUrl"] = media_url
+        body["mediaType"] = media_type or "image"
+    r = await _baileys_request("POST", f"/sessions/{session_id}/send", json=body)
+    if r.status_code == 200:
+        return {"status": "sent", **r.json()}
+    return {"status": "failed", "error": r.text}
+
+async def baileys_disconnect(session_id: str) -> None:
+    await _baileys_request("POST", f"/sessions/{session_id}/disconnect")
+
+async def baileys_delete(session_id: str) -> None:
+    await _baileys_request("DELETE", f"/sessions/{session_id}")
+
+def clean_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+    if doc is None:
+        return None
+    doc.pop("_id", None)
+    return doc
+
+# ------------------ Models ------------------
+
+class RegisterReq(BaseModel):
+    name: str
+    email: EmailStr
+    password: str = Field(min_length=6)
+
+class LoginReq(BaseModel):
+    email: EmailStr
+    password: str
+
+class GoogleSessionReq(BaseModel):
+    session_id: str
+
+class InvitationCreateReq(BaseModel):
+    email: EmailStr
+    name: Optional[str] = None
+    role: str = "user"
+
+class InvitationAcceptReq(BaseModel):
+    name: str
+    password: str = Field(min_length=6)
+
+class SessionCreateReq(BaseModel):
+    name: str
+    phone_label: Optional[str] = None
+
+class SendMessageReq(BaseModel):
+    session_id: str
+    to: str
+    message: str
+    media_url: Optional[str] = None
+    media_type: Optional[str] = None
+
+class BroadcastReq(BaseModel):
+    session_id: str
+    numbers: List[str] = Field(..., max_length=500)
+    message: str
+
+    @field_validator("numbers")
+    @classmethod
+    def numbers_not_empty(cls, v):
+        if len(v) == 0:
+            raise ValueError("numbers cannot be empty")
+        return v
+
+class SimulateInboundReq(BaseModel):
+    session_id: str
+    text: str = Field(..., min_length=1, max_length=4096)
+    from_: Optional[str] = Field(default=None, alias="from")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+class AutoReplyRuleReq(BaseModel):
+    session_id: Optional[str] = None
+    keyword: str
+    match_type: str = "contains"
+    reply: str
+    active: bool = True
+
+class ApiKeyCreateReq(BaseModel):
+    label: str
+
+class PublicSendReq(BaseModel):
+    session_id: str
+    to: str
+    message: str
+
+# ------------------ Startup ------------------
+
+@app.on_event("startup")
+async def startup():
+    await db.users.create_index("email", unique=True)
+    await db.users.create_index("id", unique=True)
+    await db.sessions.create_index("id", unique=True)
+    await db.sessions.create_index("user_id")
+    await db.messages.create_index("user_id")
+    await db.messages.create_index("created_at")
+    await db.api_keys.create_index("id", unique=True)
+    await db.api_keys.create_index("key_hash", unique=True, sparse=True)
+    await db.auto_replies.create_index("user_id")
+    await db.invitations.create_index("token", unique=True)
+    await db.invitations.create_index("email")
+    try:
+        await db.api_keys.drop_index("key_1")
+    except Exception:
+        pass
+
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@wagateway.com")
+    existing = await db.users.find_one({"email": admin_email})
+    if not existing:
+        admin_password = os.environ.get("ADMIN_PASSWORD")
+        generated = False
+        if not admin_password:
+            admin_password = secrets.token_urlsafe(18)
+            generated = True
+        await db.users.insert_one({
+            "id": new_id(),
+            "email": admin_email,
+            "name": "Admin",
+            "role": "admin",
+            "status": "active",
+            "auth_provider": "password",
+            "password_hash": hash_password(admin_password),
+            "created_at": now_iso(),
+        })
+        if generated:
+            logger.warning("=" * 70)
+            logger.warning("FIRST-BOOT ADMIN CREATED — SAVE THIS PASSWORD NOW (shown only once)")
+            logger.warning("  email:    %s", admin_email)
+            logger.warning("  password: %s", admin_password)
+            logger.warning("=" * 70)
+        else:
+            logger.info("Seeded admin user %s from ADMIN_PASSWORD env", admin_email)
+
+    await db.users.update_many({"status": {"$exists": False}}, {"$set": {"status": "active"}})
+    await db.users.update_many({"auth_provider": {"$exists": False}}, {"$set": {"auth_provider": "password"}})
+
+    async for k in db.api_keys.find({"key_hash": {"$exists": False}, "key": {"$exists": True}}):
+        plain = k.get("key", "")
+        await db.api_keys.update_one(
+            {"id": k["id"]},
+            {
+                "$set": {
+                    "key_hash": hash_api_key(plain),
+                    "key_prefix": plain[:8],
+                    "key_suffix": plain[-4:] if len(plain) >= 4 else "",
+                },
+                "$unset": {"key": ""},
+            },
+        )
+    logger.info("API key migration to hashed storage complete")
+
+    if USE_REAL_BAILEYS and not BAILEYS_TOKEN:
+        logger.warning(
+            "SECURITY: BAILEYS_URL is set but BAILEYS_TOKEN is empty — "
+            "/api/webhook/baileys is unauthenticated and can be spoofed."
+        )
+
+@app.on_event("shutdown")
+async def shutdown():
+    client.close()
+
+# ------------------ Auth ------------------
+
+@api_router.post("/auth/register")
+@limiter.limit("3/minute")
+async def register(request: Request, req: RegisterReq):
+    email = req.email.lower().strip()
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="Email already registered")
+    user = {
+        "id": new_id(),
+        "email": email,
+        "name": req.name.strip(),
+        "role": "user",
+        "status": "active",
+        "auth_provider": "password",
+        "password_hash": hash_password(req.password),
+        "created_at": now_iso(),
+    }
+    await db.users.insert_one(user)
+    token = create_access_token(user["id"], user["email"])
+    user.pop("password_hash", None)
+    user.pop("_id", None)
+    return {"user": user, "access_token": token, "token_type": "bearer"}
+
+@api_router.post("/auth/login")
+@limiter.limit("5/minute")
+async def login(request: Request, req: LoginReq):
+    email = req.email.lower().strip()
+    user = await db.users.find_one({"email": email})
+    if not user or not user.get("password_hash") or not verify_password(req.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if user.get("status", "active") != "active":
+        raise HTTPException(status_code=403, detail="Account awaiting admin approval")
+    token = create_access_token(user["id"], user["email"])
+    user.pop("password_hash", None)
+    user.pop("_id", None)
+    return {"user": user, "access_token": token, "token_type": "bearer"}
+
+# ------------------ Google Auth ------------------
+
+EMERGENT_SESSION_DATA_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
+
+@api_router.post("/auth/google/session")
+@limiter.limit("10/minute")
+async def google_session(request: Request, req: GoogleSessionReq):
+    async with httpx.AsyncClient(timeout=10) as http:
+        try:
+            r = await http.get(EMERGENT_SESSION_DATA_URL, headers={"X-Session-ID": req.session_id})
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"Auth provider unreachable: {e}")
+    if r.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid or expired Google session")
+    data = r.json()
+    email = (data.get("email") or "").lower().strip()
+    name = data.get("name") or email.split("@")[0]
+    picture = data.get("picture")
+    if not email:
+        raise HTTPException(status_code=400, detail="Google did not return an email")
+
+    user = await db.users.find_one({"email": email})
+    if not user:
+        user = {
+            "id": new_id(),
+            "email": email,
+            "name": name,
+            "picture": picture,
+            "role": "user",
+            "status": "pending",
+            "auth_provider": "google",
+            "created_at": now_iso(),
+        }
+        await db.users.insert_one(user)
+        raise HTTPException(status_code=403, detail="Account created. Awaiting admin approval before you can sign in.")
+
+    if user.get("status", "active") != "active":
+        raise HTTPException(status_code=403, detail="Account awaiting admin approval")
+
+    update = {}
+    if name and user.get("name") != name:
+        update["name"] = name
+    if picture and user.get("picture") != picture:
+        update["picture"] = picture
+    if update:
+        await db.users.update_one({"id": user["id"]}, {"$set": update})
+        user.update(update)
+
+    token = create_access_token(user["id"], user["email"])
+    user.pop("password_hash", None)
+    user.pop("_id", None)
+    return {"user": user, "access_token": token, "token_type": "bearer"}
+
+# ------------------ Admin: user approval ------------------
+
+@api_router.get("/admin/users")
+async def admin_list_users(status: Optional[str] = None, admin=Depends(require_admin)):
+    q: Dict[str, Any] = {}
+    if status:
+        q["status"] = status
+    cursor = db.users.find(q, {"password_hash": 0}).sort("created_at", -1)
+    items = []
+    async for d in cursor:
+        d.pop("_id", None)
+        items.append(d)
+    return items
+
+@api_router.post("/admin/users/{user_id}/approve")
+async def admin_approve_user(user_id: str, admin=Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    await db.users.update_one({"id": user_id}, {"$set": {"status": "active", "approved_at": now_iso(), "approved_by": admin["id"]}})
+    html = _email_template(
+        title="Your WA Gateway account is approved",
+        intro="Good news — your account has been approved. You can now sign in with Google.",
+        button_text="Sign in",
+        button_url=f"{APP_PUBLIC_URL.rstrip('/')}/login",
+        footer="WA Gateway · admin notification",
+    )
+    asyncio.create_task(send_email(target["email"], "Your WA Gateway account is approved", html))
+    return {"ok": True}
+
+@api_router.post("/admin/users/{user_id}/reject")
+async def admin_reject_user(user_id: str, admin=Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.get("role") == "admin":
+        raise HTTPException(status_code=400, detail="Cannot reject an admin")
+    await db.users.delete_one({"id": user_id})
+    return {"ok": True}
+
+# ------------------ Invitations ------------------
+
+@api_router.post("/admin/invitations")
+async def create_invitation(req: InvitationCreateReq, admin=Depends(require_admin)):
+    email = req.email.lower().strip()
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="A user with that email already exists")
+    await db.invitations.update_many({"email": email, "status": "pending"}, {"$set": {"status": "revoked"}})
+    token = secrets.token_urlsafe(24)
+    doc = {
+        "id": new_id(),
+        "token": token,
+        "email": email,
+        "name": req.name or "",
+        "role": req.role if req.role in ("user", "admin") else "user",
+        "status": "pending",
+        "invited_by": admin["id"],
+        "created_at": now_iso(),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+        "accepted_at": None,
+    }
+    await db.invitations.insert_one(doc)
+    invite_url = f"{APP_PUBLIC_URL.rstrip('/')}/invite/{token}"
+    html = _email_template(
+        title="You're invited to WA Gateway",
+        intro=f"Hi{(' ' + req.name) if req.name else ''}, you've been invited to join WA Gateway. Click below to set your password and activate your account.",
+        button_text="Accept invitation",
+        button_url=invite_url,
+        footer=f"If you didn't expect this, ignore this email. Link: {invite_url}",
+    )
+    asyncio.create_task(send_email(email, "You're invited to WA Gateway", html))
+    return clean_doc(dict(doc))
+
+@api_router.get("/admin/invitations")
+async def list_invitations(admin=Depends(require_admin)):
+    cursor = db.invitations.find({}).sort("created_at", -1)
+    return [clean_doc(d) async for d in cursor]
+
+@api_router.delete("/admin/invitations/{invite_id}")
+async def revoke_invitation(invite_id: str, admin=Depends(require_admin)):
+    res = await db.invitations.update_one({"id": invite_id, "status": "pending"}, {"$set": {"status": "revoked"}})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Invitation not found or not pending")
+    return {"ok": True}
+
+@api_router.get("/invitations/{token}")
+async def get_invitation(token: str):
+    inv = await db.invitations.find_one({"token": token})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    if inv["status"] != "pending":
+        raise HTTPException(status_code=410, detail=f"Invitation {inv['status']}")
+    if inv["expires_at"] < now_iso():
+        raise HTTPException(status_code=410, detail="Invitation expired")
+    return {"email": inv["email"], "name": inv.get("name", ""), "role": inv["role"]}
+
+@api_router.post("/invitations/{token}/accept")
+@limiter.limit("5/minute")
+async def accept_invitation(request: Request, token: str, req: InvitationAcceptReq):
+    inv = await db.invitations.find_one({"token": token})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    if inv["status"] != "pending":
+        raise HTTPException(status_code=410, detail=f"Invitation {inv['status']}")
+    if inv["expires_at"] < now_iso():
+        raise HTTPException(status_code=410, detail="Invitation expired")
+    if await db.users.find_one({"email": inv["email"]}):
+        await db.invitations.update_one({"id": inv["id"]}, {"$set": {"status": "revoked"}})
+        raise HTTPException(status_code=400, detail="A user with that email already exists")
+    user = {
+        "id": new_id(),
+        "email": inv["email"],
+        "name": req.name.strip(),
+        "role": inv["role"],
+        "status": "active",
+        "auth_provider": "password",
+        "password_hash": hash_password(req.password),
+        "invited_by": inv["invited_by"],
+        "created_at": now_iso(),
+    }
+    await db.users.insert_one(user)
+    await db.invitations.update_one({"id": inv["id"]}, {"$set": {"status": "accepted", "accepted_at": now_iso(), "accepted_user_id": user["id"]}})
+    token_jwt = create_access_token(user["id"], user["email"])
+    user.pop("password_hash", None)
+    user.pop("_id", None)
+    return {"user": user, "access_token": token_jwt, "token_type": "bearer"}
+
+@api_router.get("/auth/me")
+async def me(user: Dict[str, Any] = Depends(get_current_user)):
+    return user
+
+# ------------------ Sessions (Multi WA accounts) ------------------
+
+async def simulate_qr_lifecycle(session_id: str):
+    await asyncio.sleep(20)
+    sess = await db.sessions.find_one({"id": session_id})
+    if sess and sess["status"] == "qr":
+        if random.random() < 0.75:
+            phone = "62" + "".join(str(random.randint(0, 9)) for _ in range(10))
+            await db.sessions.update_one(
+                {"id": session_id},
+                {"$set": {
+                    "status": "connected",
+                    "connected_at": now_iso(),
+                    "phone_number": phone,
+                    "qr_data_url": None,
+                }},
+            )
+
+@api_router.post("/sessions")
+async def create_session(req: SessionCreateReq, user=Depends(get_current_user)):
+    sid = new_id()
+    doc = {
+        "id": sid,
+        "user_id": user["id"],
+        "name": req.name,
+        "phone_label": req.phone_label,
+        "status": "qr",
+        "qr_data_url": None,
+        "phone_number": None,
+        "created_at": now_iso(),
+        "connected_at": None,
+    }
+    if USE_REAL_BAILEYS:
+        try:
+            st = await baileys_connect(sid)
+            doc["status"] = st.get("status", "qr")
+            doc["qr_data_url"] = st.get("qr_data_url")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Baileys connect failed: {e}")
+    else:
+        qr_payload = f"wa-gateway:{sid}:{secrets.token_urlsafe(12)}"
+        doc["qr_data_url"] = make_qr_data_url(qr_payload)
+        asyncio.create_task(simulate_qr_lifecycle(sid))
+    await db.sessions.insert_one(doc)
+    return clean_doc(doc)
+
+@api_router.get("/sessions")
+async def list_sessions(user=Depends(get_current_user)):
+    cursor = db.sessions.find({"user_id": user["id"]}).sort("created_at", -1)
+    return [clean_doc(d) async for d in cursor]
+
+@api_router.get("/sessions/{session_id}")
+async def get_session(session_id: str, user=Depends(get_current_user)):
+    sess = await db.sessions.find_one({"id": session_id, "user_id": user["id"]})
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if USE_REAL_BAILEYS:
+        live = await baileys_get(session_id)
+        if live:
+            patch = {
+                "status": live.get("status", sess["status"]),
+                "qr_data_url": live.get("qr_data_url"),
+                "phone_number": live.get("phone_number") or sess.get("phone_number"),
+            }
+            if patch["status"] == "connected" and not sess.get("connected_at"):
+                patch["connected_at"] = now_iso()
+            await db.sessions.update_one({"id": session_id}, {"$set": patch})
+            sess.update(patch)
+    return clean_doc(sess)
+
+@api_router.post("/sessions/{session_id}/regenerate-qr")
+async def regenerate_qr(session_id: str, user=Depends(get_current_user)):
+    sess = await db.sessions.find_one({"id": session_id, "user_id": user["id"]})
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if USE_REAL_BAILEYS:
+        await baileys_delete(session_id)
+        st = await baileys_connect(session_id)
+        await db.sessions.update_one(
+            {"id": session_id},
+            {"$set": {"status": st.get("status", "qr"), "qr_data_url": st.get("qr_data_url"), "connected_at": None, "phone_number": None}},
+        )
+        return {"qr_data_url": st.get("qr_data_url"), "status": st.get("status", "qr")}
+    qr_payload = f"wa-gateway:{session_id}:{secrets.token_urlsafe(12)}"
+    qr = make_qr_data_url(qr_payload)
+    await db.sessions.update_one(
+        {"id": session_id},
+        {"$set": {"status": "qr", "qr_data_url": qr, "connected_at": None, "phone_number": None}},
+    )
+    asyncio.create_task(simulate_qr_lifecycle(session_id))
+    return {"qr_data_url": qr, "status": "qr"}
+
+@api_router.post("/sessions/{session_id}/disconnect")
+async def disconnect_session(session_id: str, user=Depends(get_current_user)):
+    sess = await db.sessions.find_one({"id": session_id, "user_id": user["id"]})
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if USE_REAL_BAILEYS:
+        await baileys_disconnect(session_id)
+    await db.sessions.update_one({"id": session_id}, {"$set": {"status": "disconnected", "qr_data_url": None}})
+    return {"status": "disconnected"}
+
+@api_router.delete("/sessions/{session_id}")
+async def delete_session(session_id: str, user=Depends(get_current_user)):
+    sess = await db.sessions.find_one({"id": session_id, "user_id": user["id"]})
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if USE_REAL_BAILEYS:
+        await baileys_delete(session_id)
+    await db.sessions.delete_one({"id": session_id, "user_id": user["id"]})
+    return {"ok": True}
+
+# ------------------ Messages & Broadcast Logic ------------------
+
+async def _process_send(user_id: str, session_id: str, to: str, message: str,
+                        media_url: Optional[str] = None, media_type: Optional[str] = None,
+                        source: str = "ui") -> Dict[str, Any]:
+    sess = await db.sessions.find_one({"id": session_id, "user_id": user_id})
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if sess["status"] != "connected":
+        raise HTTPException(status_code=400, detail="Session is not connected. Scan QR first.")
+    msg_id = new_id()
+    provider_msg_id = None
+    if USE_REAL_BAILEYS:
+        res = await baileys_send(session_id, to, message, media_url, media_type)
+        status = res.get("status", "failed")
+        provider_msg_id = res.get("message_id")
+    else:
+        status = "sent" if random.random() < 0.92 else "failed"
+    doc = {
+        "id": msg_id,
+        "user_id": user_id,
+        "session_id": session_id,
+        "direction": "outbound",
+        "to": to,
+        "from": sess.get("phone_number"),
+        "message": message,
+        "media_url": media_url,
+        "media_type": media_type,
+        "status": status,
+        "provider_message_id": provider_msg_id,
+        "source": source,
+        "created_at": now_iso(),
+    }
+    await db.messages.insert_one(doc)
+    return clean_doc(doc)
+
+@api_router.post("/messages/send")
+async def send_message(req: SendMessageReq, user=Depends(get_current_user)):
+    cleaned_to = sanitize_phone_number(req.to)
+    return await _process_send(user["id"], req.session_id, cleaned_to, req.message, req.media_url, req.media_type, source="ui")
+
+@api_router.post("/messages/broadcast")
+async def broadcast(req: BroadcastReq, user=Depends(get_current_user)):
+    """Fitur Broadcast Massal Teroptimasi (Background Worker + Anti-Banned Delay)"""
+    sess = await db.sessions.find_one({"id": req.session_id, "user_id": user["id"]})
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if sess["status"] != "connected":
+        raise HTTPException(status_code=400, detail="Session is not connected.")
+
+    async def run_broadcast_worker(numbers: list, message: str, user_id: str, session_id: str):
+        for number in numbers:
+            num = number.strip()
+            if not num:
+                continue
+            try:
+                cleaned_num = sanitize_phone_number(num)
+                await _process_send(user_id, session_id, cleaned_num, message, source="broadcast")
+                # Jeda acak aman 3-6 detik antar nomor agar tidak dicurigai bot spammer oleh WhatsApp
+                await asyncio.sleep(random.uniform(3.0, 6.0))
+            except Exception as e:
+                logger.error(f"Failed sending broadcast item to {num}: {e}")
+
+    # Jalankan antrean di background agar HTTP response langsung selesai tanpa memblokir client UI
+    asyncio.create_task(run_broadcast_worker(req.numbers, req.message, user["id"], req.session_id))
+    
+    return {
+        "ok": True,
+        "message": f"Broadcast process started in background for {len(req.numbers)} numbers."
+    }
+
+@api_router.get("/messages")
+async def list_messages(
+    limit: int = 50,
+    skip: int = 0,
+    status: Optional[str] = None,
+    session_id: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    q: Dict[str, Any] = {"user_id": user["id"]}
+    if status:
+        q["status"] = status
+    if session_id:
+        q["session_id"] = session_id
+    cursor = db.messages.find(q).sort("created_at", -1).skip(skip).limit(limit)
+    items = [clean_doc(d) async for d in cursor]
+    total = await db.messages.count_documents(q)
+    return {"items": items, "total": total}
+
+# ------------------ Auto-Reply ------------------
+
+@api_router.post("/auto-replies")
+async def create_rule(req: AutoReplyRuleReq, user=Depends(get_current_user)):
+    doc = {
+        "id": new_id(),
+        "user_id": user["id"],
+        "session_id": req.session_id,
+        "keyword": req.keyword,
+        "match_type": req.match_type,
+        "reply": req.reply,
+        "active": req.active,
+        "created_at": now_iso(),
+    }
+    await db.auto_replies.insert_one(doc)
+    return clean_doc(doc)
+
+@api_router.get("/auto-replies")
+async def list_rules(user=Depends(get_current_user)):
+    cursor = db.auto_replies.find({"user_id": user["id"]}).sort("created_at", -1)
+    return [clean_doc(d) async for d in cursor]
+
+@api_router.patch("/auto-replies/{rule_id}")
+async def update_rule(rule_id: str, req: AutoReplyRuleReq, user=Depends(get_current_user)):
+    res = await db.auto_replies.update_one({"id": rule_id, "user_id": user["id"]}, {"$set": req.model_dump()})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    doc = await db.auto_replies.find_one({"id": rule_id})
+    return clean_doc(doc)
+
+@api_router.delete("/auto-replies/{rule_id}")
+async def delete_rule(rule_id: str, user=Depends(get_current_user)):
+    res = await db.auto_replies.delete_one({"id": rule_id, "user_id": user["id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    return {"ok": True}
+
+async def _match_and_reply(user_id: str, session_id: str, sender: str, text: str) -> Optional[Dict[str, Any]]:
+    rules = await db.auto_replies.find({
+        "user_id": user_id,
+        "active": True,
+        "$or": [{"session_id": session_id}, {"session_id": None}],
+    }).to_list(100)
+    low = text.lower()
+    matched = None
+    for r in rules:
+        kw = r["keyword"].lower().strip()
+        mt = r.get("match_type", "contains")
+        if mt == "exact" and low == kw:
+            matched = r
+            break
+        if mt == "starts_with" and low.startswith(kw):
+            matched = r
+            break
+        if mt == "contains" and kw in low:
+            matched = r
+            break
+    if not matched:
+        return None
+    try:
+        return await _process_send(user_id, session_id, sender, matched["reply"], source="auto_reply")
+    except HTTPException:
+        return None
+
+@api_router.post("/auto-replies/simulate")
+async def simulate_incoming(req: SimulateInboundReq, user=Depends(get_current_user)):
+    session_id = req.session_id
+    text = req.text.strip()
+    sender = req.from_ or "62" + "".join(str(random.randint(0, 9)) for _ in range(10))
+    sess = await db.sessions.find_one({"id": session_id, "user_id": user["id"]})
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    inbound = {
+        "id": new_id(),
+        "user_id": user["id"],
+        "session_id": session_id,
+        "direction": "inbound",
+        "to": sess.get("phone_number"),
+        "from": sender,
+        "message": text,
+        "status": "received",
+        "source": "inbound",
+        "created_at": now_iso(),
+    }
+    await db.messages.insert_one(inbound)
+    reply_doc = await _match_and_reply(user["id"], session_id, sender, text)
+    matched_rule = None
+    if reply_doc:
+        rules = await db.auto_replies.find({
+            "user_id": user["id"], "active": True,
+            "$or": [{"session_id": session_id}, {"session_id": None}],
+        }).to_list(100)
+        low = text.lower()
+        for r in rules:
+            kw = r["keyword"].lower().strip()
+            mt = r.get("match_type", "contains")
+            ok = (mt == "exact" and low == kw) or (mt == "starts_with" and low.startswith(kw)) or (mt == "contains" and kw in low)
+            if ok:
+                matched_rule = r
+                break
+    return {"inbound": clean_doc(inbound), "matched_rule": clean_doc(matched_rule), "reply": reply_doc}
+
+# ------------------ API Keys Management ------------------
+
+@api_router.post("/api-keys")
+async def create_api_key(req: ApiKeyCreateReq, user=Depends(get_current_user)):
+    key = "wag_" + secrets.token_urlsafe(32)
+    doc = {
+        "id": new_id(),
+        "user_id": user["id"],
+        "label": req.label,
+        "key_hash": hash_api_key(key),
+        "key_prefix": key[:8],
+        "key_suffix": key[-4:],
+        "revoked": False,
+        "created_at": now_iso(),
+        "last_used_at": None,
+    }
+    await db.api_keys.insert_one(doc)
+    out = clean_doc(dict(doc))
+    out.pop("key_hash", None)
+    out["key"] = key
+    return out
+
+@api_router.get("/api-keys")
+async def list_api_keys(user=Depends(get_current_user)):
+    cursor = db.api_keys.find({"user_id": user["id"]}).sort("created_at", -1)
+    items = []
+    async for d in cursor:
+        d = clean_doc(d)
+        prefix = d.get("key_prefix", "wag_")
+        suffix = d.get("key_suffix", "")
+        d["key_masked"] = f"{prefix}...{suffix}"
+        d.pop("key_hash", None)
+        items.append(d)
+    return items
+
+@api_router.delete("/api-keys/{key_id}")
+async def revoke_api_key(key_id: str, user=Depends(get_current_user)):
+    res = await db.api_keys.update_one({"id": key_id, "user_id": user["id"]}, {"$set": {"revoked": True}})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Key not found")
+    return {"ok": True}
+
+# ------------------ Public REST API (Untuk Pihak Ketiga) ------------------
+
+@api_router.post("/v1/send")
+@limiter.limit("60/minute")
+async def public_send(request: Request, req: PublicSendReq, user=Depends(get_user_by_api_key)):
+    cleaned_to = sanitize_phone_number(req.to)
+    return await _process_send(user["id"], req.session_id, cleaned_to, req.message, source="api")
+
+@api_router.get("/v1/sessions")
+async def public_sessions(user=Depends(get_user_by_api_key)):
+    cursor = db.sessions.find({"user_id": user["id"]})
+    return [{"id": d["id"], "name": d["name"], "status": d["status"], "phone_number": d.get("phone_number")} async for d in cursor]
+
+# ------------------ Stats / Dashboard ------------------
+
+@api_router.get("/stats/overview")
+async def stats_overview(user=Depends(get_current_user)):
+    user_q = {"user_id": user["id"]}
+    total_sessions = await db.sessions.count_documents(user_q)
+    connected_sessions = await db.sessions.count_documents({**user_q, "status": "connected"})
+    total_messages = await db.messages.count_documents({**user_q, "direction": "outbound"})
+    sent_messages = await db.messages.count_documents({**user_q, "direction": "outbound", "status": "sent"})
+    failed_messages = await db.messages.count_documents({**user_q, "direction": "outbound", "status": "failed"})
+
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    today_messages = await db.messages.count_documents({**user_q, "direction": "outbound", "created_at": {"$gte": today_start}})
+
+    series = []
+    for i in range(6, -1, -1):
+        day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=i)
+        next_day = day + timedelta(days=1)
+        count = await db.messages.count_documents({**user_q, "direction": "outbound", "created_at": {"$gte": day.isoformat(), "$lt": next_day.isoformat()}})
+        series.append({"date": day.strftime("%b %d"), "count": count})
+
+    success_rate = round((sent_messages / total_messages) * 100, 1) if total_messages else 100.0
+    return {
+        "total_sessions": total_sessions,
+        "connected_sessions": connected_sessions,
+        "total_messages": total_messages,
+        "sent_messages": sent_messages,
+        "failed_messages": failed_messages,
+        "today_messages": today_messages,
+        "success_rate": success_rate,
+        "series": series,
+    }
+
+# ------------------ Baileys Webhook Handler ------------------
+
+@api_router.post("/webhook/baileys")
+async def baileys_webhook(request: Request):
+    if BAILEYS_TOKEN and request.headers.get("x-internal-token") != BAILEYS_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid internal token")
+    payload = await request.json()
+    event = payload.get("event")
+    session_id = payload.get("session_id")
+    if not event or not session_id:
+        raise HTTPException(status_code=400, detail="event and session_id required")
+
+    sess = await db.sessions.find_one({"id": session_id})
+    if not sess:
+        return {"ok": True, "skip": "unknown session"}
+
+    if event == "qr":
+        await db.sessions.update_one({"id": session_id}, {"$set": {"status": "qr"}})
+    elif event == "connected":
+        await db.sessions.update_one(
+            {"id": session_id},
+            {"$set": {
+                "status": "connected",
+                "phone_number": payload.get("phone_number"),
+                "qr_data_url": None,
+                "connected_at": now_iso(),
+            }},
+        )
+    elif event == "disconnected":
+        await db.sessions.update_one({"id": session_id}, {"$set": {"status": payload.get("status", "disconnected"), "qr_data_url": None}})
+    elif event == "message":
+        text = payload.get("text") or ""
+        sender = payload.get("from") or ""
+        if not text or not sender:
+            return {"ok": True}
+        await db.messages.insert_one({
+            "id": new_id(),
+            "user_id": sess["user_id"],
+            "session_id": session_id,
+            "direction": "inbound",
+            "to": sess.get("phone_number"),
+            "from": sender,
+            "message": text,
+            "status": "received",
+            "source": "inbound",
+            "provider_message_id": payload.get("message_id"),
+            "created_at": now_iso(),
+        })
+        asyncio.create_task(_match_and_reply(sess["user_id"], session_id, sender, text))
+    return {"ok": True}
+
+# ------------------ Health ------------------
+
+@api_router.get("/")
+async def root():
+    return {"service": "wa-gateway", "status": "ok", "ts": now_iso()}
+
+app.include_router(api_router)
+
+_default_cors = "http://localhost:3000"
+_cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", _default_cors).split(",") if o.strip()]
+_allow_all = _cors_origins == ["*"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=not _allow_all,
+    allow_origins=_cors_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
