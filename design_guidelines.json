@@ -1,0 +1,123 @@
+{
+  "theme": "light",
+  "archetype": "Archetype 4: Swiss & High-Contrast",
+  "design_philosophy": "Objective, highly functional, developer-first dashboard inspired by Vercel and Linear. No fluff, no gradients. Strict contrast, dense data presentation, and clear binary statuses.",
+  "typography": {
+    "headings": {
+      "font_family": "Satoshi, sans-serif",
+      "weights": ["500", "600", "700"],
+      "tracking": "tracking-tight",
+      "rules": "Never use Inter for headings. Keep them sharp and compact."
+    },
+    "body": {
+      "font_family": "Geist, system-ui, sans-serif",
+      "weights": ["400", "500"]
+    },
+    "mono": {
+      "font_family": "JetBrains Mono, monospace",
+      "weights": ["400", "500"],
+      "usage": "Use for API keys, JSON payloads, phone numbers, UUIDs, and timestamps."
+    },
+    "sizing": {
+      "h1": "text-3xl md:text-4xl font-bold tracking-tight text-zinc-900",
+      "h2": "text-xl md:text-2xl font-semibold tracking-tight text-zinc-900",
+      "h3": "text-lg font-medium tracking-tight text-zinc-900",
+      "body": "text-sm text-zinc-600",
+      "mono_sm": "text-xs font-mono text-zinc-700"
+    }
+  },
+  "colors": {
+    "background": "bg-zinc-50",
+    "surface": "bg-white",
+    "primary": "bg-zinc-900 text-white",
+    "primary_hover": "hover:bg-zinc-800 hover:text-white",
+    "border": "border-zinc-200",
+    "muted": "text-zinc-500 text-sm",
+    "status": {
+      "success": "bg-emerald-50 text-emerald-700 border border-emerald-200",
+      "error": "bg-red-50 text-red-700 border border-red-200",
+      "warning": "bg-amber-50 text-amber-700 border border-amber-200",
+      "info": "bg-blue-50 text-blue-700 border border-blue-200",
+      "draft": "bg-zinc-100 text-zinc-700 border border-zinc-200"
+    }
+  },
+  "layout": {
+    "structure": "Sidebar (w-64, border-r border-zinc-200, bg-zinc-50/50 backdrop-blur-md) + Main Content (flex-1, p-6 md:p-8)",
+    "container": "max-w-7xl mx-auto space-y-8",
+    "grid_metrics": "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4",
+    "card": "bg-white border border-zinc-200 rounded-xl shadow-sm p-6",
+    "spacing": "Use p-6 or p-8 generously inside containers to avoid text collision with borders."
+  },
+  "components": {
+    "buttons": "rounded-md px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 disabled:pointer-events-none disabled:opacity-50",
+    "inputs": "flex h-9 w-full rounded-md border border-zinc-200 bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-zinc-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-zinc-950 disabled:cursor-not-allowed disabled:opacity-50",
+    "tables": "w-full caption-bottom text-sm. Header: border-b border-zinc-200 text-left align-middle font-medium text-zinc-500. Row: border-b border-zinc-200 transition-colors hover:bg-zinc-50/50 data-[state=selected]:bg-zinc-50. Use JetBrains Mono for data columns.",
+    "badges": "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:ring-offset-2",
+    "qr_scanner_card": "flex flex-col items-center justify-center p-8 border-2 border-dashed border-zinc-200 rounded-2xl bg-zinc-50/50 transition-all hover:border-zinc-300"
+  },
+  "interactions": {
+    "hover": "Subtle background shifts (bg-zinc-50) rather than heavy shadows.",
+    "focus": "Strict 2px focus rings (focus-visible:ring-zinc-900) for accessibility.",
+    "active": "Scale down slightly active:scale-[0.98]"
+  },
+  "media": {
+    "images": [
+      {
+        "url": "https://images.unsplash.com/photo-1532456745301-b2c645d8b80d?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2MzR8MHwxfHNlYXJjaHwzfHxhYnN0cmFjdCUyMGdlb21ldHJpYyUyMHRleHR1cmUlMjBhcmNoaXRlY3R1cmV8ZW58MHx8fGJsYWNrX2FuZF93aGl0ZXwxNzgyNzAzNzYzfDA&ixlib=rb-4.1.0&q=85",
+        "category": "auth_background",
+        "description": "White concrete building facade pattern - Use as a subtle architectural background for the Login/Register split screen on the right side. Add an opacity-40 overlay for readability."
+      }
+    ],
+    "icons": {
+      "library": "lucide-react",
+      "style": "stroke-width: 1.5, text-zinc-500 for inactive, text-zinc-900 for active/headers"
+    }
+  },
+  "pages": {
+    "auth": {
+      "layout": "Split screen: left side form (clean, centered, w-full max-w-sm mx-auto), right side decorative abstract architecture image with an overlay quoting a developer.",
+      "components": ["Card", "Input", "Button", "Label"]
+    },
+    "dashboard": {
+      "layout": "Top-left focus metrics (Active Sessions, Messages Sent). Below: Mini-charts or tables of recent activity.",
+      "components": ["Card", "Badge", "Table"]
+    },
+    "sessions": {
+      "layout": "List of connected numbers in a grid or table. 'Add New' opens a modal or side-panel to QR connection flow. QR view must have a skeleton loader and clear instructions.",
+      "components": ["QR display area", "Status Badge", "Button (Connect/Disconnect)"]
+    },
+    "send_message": {
+      "layout": "Two-column form: Left side configuration (select session, enter number, text), right side live mobile preview of the message.",
+      "components": ["Select", "Textarea", "Input", "File Upload"]
+    },
+    "broadcast": {
+      "layout": "Upload CSV area (dashed dropzone) + mapping fields + compose message.",
+      "components": ["Dropzone", "Table (preview)", "Button"]
+    },
+    "auto_reply": {
+      "layout": "Rule builder: IF [Keyword] THEN [Template]. Clean rows with 'Add Rule' button.",
+      "components": ["Input", "Select", "Textarea", "Switch (Toggle active)"]
+    },
+    "history": {
+      "layout": "Dense data table. Phone numbers in JetBrains Mono. Statuses as pills.",
+      "components": ["Table", "Pagination", "Filter Dropdowns", "Badge"]
+    },
+    "api_keys": {
+      "layout": "List of keys (partially masked). 'Generate Key' button. One-click copy interactions.",
+      "components": ["Table", "Button (Copy)", "Dialog (Generate)"]
+    },
+    "api_docs": {
+      "layout": "Code-heavy layout. Two-column: Left side endpoints/parameters in prose, right side dark-mode code blocks for cURL/JS examples.",
+      "components": ["CodeBlock", "Tabs", "Badge (GET/POST)"]
+    }
+  },
+  "testing": {
+    "attributes": "All interactive and key informational elements MUST include a data-testid attribute in kebab-case (e.g., data-testid='login-submit-button', data-testid='qr-code-canvas')."
+  },
+  "instructions_to_main_agent": [
+    "Ensure global css handles Satoshi and JetBrains Mono fonts. You can import from a CDN (Fontshare for Satoshi, Google Fonts for JetBrains Mono).",
+    "Strictly avoid any purple, teal, or generic gradient backgrounds.",
+    "Use Shadcn UI components for all logical interactive parts (Select, Table, Dropdown, Dialog).",
+    "For the QR Code scanning area, ensure there is a clear loading state (skeleton) before the QR canvas renders."
+  ]
+}
