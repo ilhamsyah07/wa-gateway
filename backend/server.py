@@ -37,13 +37,10 @@ JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = int(os.environ.get("JWT_EXPIRE_HOURS", "24"))
 
-# Baileys microservice — when BAILEYS_URL is set we proxy to a real Node service,
-# otherwise we run the in-process MOCK (for dev / Emergent preview).
 BAILEYS_URL = os.environ.get("BAILEYS_URL", "").rstrip("/")
 BAILEYS_TOKEN = os.environ.get("BAILEYS_TOKEN", "")
 USE_REAL_BAILEYS = bool(BAILEYS_URL)
 
-# Resend (email) — when RESEND_API_KEY is set, send real emails for invitations + approvals.
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 RESEND_FROM = os.environ.get("RESEND_FROM", "WA Gateway <onboarding@resend.dev>")
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "http://localhost:3000")
@@ -92,15 +89,18 @@ def create_access_token(user_id: str, email: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 def hash_api_key(key: str) -> str:
-    """One-way hash for API keys at rest. We never store the plaintext key."""
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
+def sanitize_phone_number(phone: str) -> str:
+    """Mengubah format nomor HP menjadi standard internasional e.g. 0812 -> 62812"""
+    cleaned = "".join(filter(str.isdigit, phone))
+    if cleaned.startswith("0"):
+        cleaned = "62" + cleaned[1:]
+    return cleaned
 
 # ------------------ Email (Resend) ------------------
 
 async def send_email(to: str, subject: str, html: str) -> bool:
-    """Send a transactional email via Resend. No-ops if RESEND_API_KEY is unset.
-    Returns True if accepted by Resend, False otherwise."""
     if not RESEND_API_KEY:
         logger.info("[email no-op] to=%s subject=%s (RESEND_API_KEY not set)", to, subject)
         return False
@@ -119,7 +119,6 @@ async def send_email(to: str, subject: str, html: str) -> bool:
         logger.warning("Resend exception: %s", e)
         return False
 
-
 def _email_template(title: str, intro: str, button_text: Optional[str] = None, button_url: Optional[str] = None, footer: str = "") -> str:
     btn = ""
     if button_text and button_url:
@@ -134,9 +133,7 @@ def _email_template(title: str, intro: str, button_text: Optional[str] = None, b
     </div>
     """
 
-async def get_current_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
-) -> Dict[str, Any]:
+async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)) -> Dict[str, Any]:
     if credentials is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     token = credentials.credentials
@@ -156,7 +153,6 @@ async def get_current_user(
     user.pop("password_hash", None)
     user.pop("_id", None)
     return user
-
 
 async def require_admin(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
     if user.get("role") != "admin":
@@ -258,10 +254,10 @@ class SessionCreateReq(BaseModel):
 
 class SendMessageReq(BaseModel):
     session_id: str
-    to: str  # phone number e.g. 6281234567890
+    to: str
     message: str
     media_url: Optional[str] = None
-    media_type: Optional[str] = None  # image, document
+    media_type: Optional[str] = None
 
 class BroadcastReq(BaseModel):
     session_id: str
@@ -283,9 +279,9 @@ class SimulateInboundReq(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 class AutoReplyRuleReq(BaseModel):
-    session_id: Optional[str] = None  # null = all sessions
+    session_id: Optional[str] = None
     keyword: str
-    match_type: str = "contains"  # contains | exact | starts_with
+    match_type: str = "contains"
     reply: str
     active: bool = True
 
@@ -312,7 +308,6 @@ async def startup():
     await db.auto_replies.create_index("user_id")
     await db.invitations.create_index("token", unique=True)
     await db.invitations.create_index("email")
-    # Drop the obsolete plaintext-key unique index if it exists (SEC-002 migration)
     try:
         await db.api_keys.drop_index("key_1")
     except Exception:
@@ -321,7 +316,6 @@ async def startup():
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@wagateway.com")
     existing = await db.users.find_one({"email": admin_email})
     if not existing:
-        # Use ADMIN_PASSWORD env if provided, else generate a strong random one and log it once.
         admin_password = os.environ.get("ADMIN_PASSWORD")
         generated = False
         if not admin_password:
@@ -345,12 +339,10 @@ async def startup():
             logger.warning("=" * 70)
         else:
             logger.info("Seeded admin user %s from ADMIN_PASSWORD env", admin_email)
-    # NOTE: never force-reset admin password on subsequent startups (SEC-001).
-    # Backfill status / auth_provider on existing users (idempotent)
+
     await db.users.update_many({"status": {"$exists": False}}, {"$set": {"status": "active"}})
     await db.users.update_many({"auth_provider": {"$exists": False}}, {"$set": {"auth_provider": "password"}})
 
-    # One-shot migration: hash any plaintext API keys still in DB (SEC-002).
     async for k in db.api_keys.find({"key_hash": {"$exists": False}, "key": {"$exists": True}}):
         plain = k.get("key", "")
         await db.api_keys.update_one(
@@ -369,8 +361,7 @@ async def startup():
     if USE_REAL_BAILEYS and not BAILEYS_TOKEN:
         logger.warning(
             "SECURITY: BAILEYS_URL is set but BAILEYS_TOKEN is empty — "
-            "/api/webhook/baileys is unauthenticated and can be spoofed. "
-            "Set BAILEYS_TOKEN in both backend and baileys-service envs."
+            "/api/webhook/baileys is unauthenticated and can be spoofed."
         )
 
 @app.on_event("shutdown")
@@ -415,17 +406,13 @@ async def login(request: Request, req: LoginReq):
     user.pop("_id", None)
     return {"user": user, "access_token": token, "token_type": "bearer"}
 
-
-# ------------------ Google Auth (Emergent-managed) ------------------
+# ------------------ Google Auth ------------------
 
 EMERGENT_SESSION_DATA_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
 
 @api_router.post("/auth/google/session")
 @limiter.limit("10/minute")
 async def google_session(request: Request, req: GoogleSessionReq):
-    """Exchange Emergent session_id for our JWT.
-    REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
-    """
     async with httpx.AsyncClient(timeout=10) as http:
         try:
             r = await http.get(EMERGENT_SESSION_DATA_URL, headers={"X-Session-ID": req.session_id})
@@ -442,7 +429,6 @@ async def google_session(request: Request, req: GoogleSessionReq):
 
     user = await db.users.find_one({"email": email})
     if not user:
-        # First time Google sign-in — create as pending, require admin approval
         user = {
             "id": new_id(),
             "email": email,
@@ -459,7 +445,6 @@ async def google_session(request: Request, req: GoogleSessionReq):
     if user.get("status", "active") != "active":
         raise HTTPException(status_code=403, detail="Account awaiting admin approval")
 
-    # Update profile fields from Google if changed
     update = {}
     if name and user.get("name") != name:
         update["name"] = name
@@ -473,7 +458,6 @@ async def google_session(request: Request, req: GoogleSessionReq):
     user.pop("password_hash", None)
     user.pop("_id", None)
     return {"user": user, "access_token": token, "token_type": "bearer"}
-
 
 # ------------------ Admin: user approval ------------------
 
@@ -495,7 +479,6 @@ async def admin_approve_user(user_id: str, admin=Depends(require_admin)):
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
     await db.users.update_one({"id": user_id}, {"$set": {"status": "active", "approved_at": now_iso(), "approved_by": admin["id"]}})
-    # Notify user by email (best-effort)
     html = _email_template(
         title="Your WA Gateway account is approved",
         intro="Good news — your account has been approved. You can now sign in with Google.",
@@ -516,7 +499,6 @@ async def admin_reject_user(user_id: str, admin=Depends(require_admin)):
     await db.users.delete_one({"id": user_id})
     return {"ok": True}
 
-
 # ------------------ Invitations ------------------
 
 @api_router.post("/admin/invitations")
@@ -524,10 +506,7 @@ async def create_invitation(req: InvitationCreateReq, admin=Depends(require_admi
     email = req.email.lower().strip()
     if await db.users.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="A user with that email already exists")
-    await db.invitations.update_many(
-        {"email": email, "status": "pending"},
-        {"$set": {"status": "revoked"}},
-    )
+    await db.invitations.update_many({"email": email, "status": "pending"}, {"$set": {"status": "revoked"}})
     token = secrets.token_urlsafe(24)
     doc = {
         "id": new_id(),
@@ -545,7 +524,7 @@ async def create_invitation(req: InvitationCreateReq, admin=Depends(require_admi
     invite_url = f"{APP_PUBLIC_URL.rstrip('/')}/invite/{token}"
     html = _email_template(
         title="You're invited to WA Gateway",
-        intro=f"Hi{(' ' + req.name) if req.name else ''}, you've been invited to join WA Gateway. Click below to set your password and activate your account. This link expires in 7 days.",
+        intro=f"Hi{(' ' + req.name) if req.name else ''}, you've been invited to join WA Gateway. Click below to set your password and activate your account.",
         button_text="Accept invitation",
         button_url=invite_url,
         footer=f"If you didn't expect this, ignore this email. Link: {invite_url}",
@@ -560,17 +539,13 @@ async def list_invitations(admin=Depends(require_admin)):
 
 @api_router.delete("/admin/invitations/{invite_id}")
 async def revoke_invitation(invite_id: str, admin=Depends(require_admin)):
-    res = await db.invitations.update_one(
-        {"id": invite_id, "status": "pending"},
-        {"$set": {"status": "revoked"}},
-    )
+    res = await db.invitations.update_one({"id": invite_id, "status": "pending"}, {"$set": {"status": "revoked"}})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Invitation not found or not pending")
     return {"ok": True}
 
 @api_router.get("/invitations/{token}")
 async def get_invitation(token: str):
-    """Public endpoint — fetch invitation by token to render the accept page."""
     inv = await db.invitations.find_one({"token": token})
     if not inv:
         raise HTTPException(status_code=404, detail="Invitation not found")
@@ -605,15 +580,11 @@ async def accept_invitation(request: Request, token: str, req: InvitationAcceptR
         "created_at": now_iso(),
     }
     await db.users.insert_one(user)
-    await db.invitations.update_one(
-        {"id": inv["id"]},
-        {"$set": {"status": "accepted", "accepted_at": now_iso(), "accepted_user_id": user["id"]}},
-    )
+    await db.invitations.update_one({"id": inv["id"]}, {"$set": {"status": "accepted", "accepted_at": now_iso(), "accepted_user_id": user["id"]}})
     token_jwt = create_access_token(user["id"], user["email"])
     user.pop("password_hash", None)
     user.pop("_id", None)
     return {"user": user, "access_token": token_jwt, "token_type": "bearer"}
-
 
 @api_router.get("/auth/me")
 async def me(user: Dict[str, Any] = Depends(get_current_user)):
@@ -622,14 +593,9 @@ async def me(user: Dict[str, Any] = Depends(get_current_user)):
 # ------------------ Sessions (Multi WA accounts) ------------------
 
 async def simulate_qr_lifecycle(session_id: str):
-    """Simulate a Baileys QR scan flow: after ~20s of being in 'qr' state,
-    auto-transition to 'connected'. In a real Baileys integration this would
-    be driven by actual WA scan events.
-    """
     await asyncio.sleep(20)
     sess = await db.sessions.find_one({"id": session_id})
     if sess and sess["status"] == "qr":
-        # 75% chance auto-connect to simulate the user scanning
         if random.random() < 0.75:
             phone = "62" + "".join(str(random.randint(0, 9)) for _ in range(10))
             await db.sessions.update_one(
@@ -657,7 +623,6 @@ async def create_session(req: SessionCreateReq, user=Depends(get_current_user)):
         "connected_at": None,
     }
     if USE_REAL_BAILEYS:
-        # Real Baileys: ask Node service to spin up the session and return initial QR.
         try:
             st = await baileys_connect(sid)
             doc["status"] = st.get("status", "qr")
@@ -667,7 +632,6 @@ async def create_session(req: SessionCreateReq, user=Depends(get_current_user)):
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Baileys connect failed: {e}")
     else:
-        # MOCK: generate fake QR + schedule auto-connect lifecycle
         qr_payload = f"wa-gateway:{sid}:{secrets.token_urlsafe(12)}"
         doc["qr_data_url"] = make_qr_data_url(qr_payload)
         asyncio.create_task(simulate_qr_lifecycle(sid))
@@ -677,8 +641,7 @@ async def create_session(req: SessionCreateReq, user=Depends(get_current_user)):
 @api_router.get("/sessions")
 async def list_sessions(user=Depends(get_current_user)):
     cursor = db.sessions.find({"user_id": user["id"]}).sort("created_at", -1)
-    items = [clean_doc(d) async for d in cursor]
-    return items
+    return [clean_doc(d) async for d in cursor]
 
 @api_router.get("/sessions/{session_id}")
 async def get_session(session_id: str, user=Depends(get_current_user)):
@@ -686,7 +649,6 @@ async def get_session(session_id: str, user=Depends(get_current_user)):
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
     if USE_REAL_BAILEYS:
-        # Refresh transient fields (status/qr) from the Baileys service
         live = await baileys_get(session_id)
         if live:
             patch = {
@@ -710,8 +672,7 @@ async def regenerate_qr(session_id: str, user=Depends(get_current_user)):
         st = await baileys_connect(session_id)
         await db.sessions.update_one(
             {"id": session_id},
-            {"$set": {"status": st.get("status", "qr"), "qr_data_url": st.get("qr_data_url"),
-                      "connected_at": None, "phone_number": None}},
+            {"$set": {"status": st.get("status", "qr"), "qr_data_url": st.get("qr_data_url"), "connected_at": None, "phone_number": None}},
         )
         return {"qr_data_url": st.get("qr_data_url"), "status": st.get("status", "qr")}
     qr_payload = f"wa-gateway:{session_id}:{secrets.token_urlsafe(12)}"
@@ -730,10 +691,7 @@ async def disconnect_session(session_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Session not found")
     if USE_REAL_BAILEYS:
         await baileys_disconnect(session_id)
-    await db.sessions.update_one(
-        {"id": session_id},
-        {"$set": {"status": "disconnected", "qr_data_url": None}},
-    )
+    await db.sessions.update_one({"id": session_id}, {"$set": {"status": "disconnected", "qr_data_url": None}})
     return {"status": "disconnected"}
 
 @api_router.delete("/sessions/{session_id}")
@@ -746,7 +704,7 @@ async def delete_session(session_id: str, user=Depends(get_current_user)):
     await db.sessions.delete_one({"id": session_id, "user_id": user["id"]})
     return {"ok": True}
 
-# ------------------ Messages ------------------
+# ------------------ Messages & Broadcast Logic ------------------
 
 async def _process_send(user_id: str, session_id: str, to: str, message: str,
                         media_url: Optional[str] = None, media_type: Optional[str] = None,
@@ -784,24 +742,38 @@ async def _process_send(user_id: str, session_id: str, to: str, message: str,
 
 @api_router.post("/messages/send")
 async def send_message(req: SendMessageReq, user=Depends(get_current_user)):
-    return await _process_send(user["id"], req.session_id, req.to, req.message,
-                               req.media_url, req.media_type, source="ui")
+    cleaned_to = sanitize_phone_number(req.to)
+    return await _process_send(user["id"], req.session_id, cleaned_to, req.message, req.media_url, req.media_type, source="ui")
 
 @api_router.post("/messages/broadcast")
 async def broadcast(req: BroadcastReq, user=Depends(get_current_user)):
-    results = []
-    for number in req.numbers:
-        num = number.strip()
-        if not num:
-            continue
-        try:
-            r = await _process_send(user["id"], req.session_id, num, req.message, source="broadcast")
-            results.append({"to": num, "status": r["status"], "id": r["id"]})
-        except HTTPException as e:
-            results.append({"to": num, "status": "failed", "error": e.detail})
-    sent = sum(1 for r in results if r["status"] == "sent")
-    failed = len(results) - sent
-    return {"total": len(results), "sent": sent, "failed": failed, "results": results}
+    """Fitur Broadcast Massal Teroptimasi (Background Worker + Anti-Banned Delay)"""
+    sess = await db.sessions.find_one({"id": req.session_id, "user_id": user["id"]})
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if sess["status"] != "connected":
+        raise HTTPException(status_code=400, detail="Session is not connected.")
+
+    async def run_broadcast_worker(numbers: list, message: str, user_id: str, session_id: str):
+        for number in numbers:
+            num = number.strip()
+            if not num:
+                continue
+            try:
+                cleaned_num = sanitize_phone_number(num)
+                await _process_send(user_id, session_id, cleaned_num, message, source="broadcast")
+                # Jeda acak aman 3-6 detik antar nomor agar tidak dicurigai bot spammer oleh WhatsApp
+                await asyncio.sleep(random.uniform(3.0, 6.0))
+            except Exception as e:
+                logger.error(f"Failed sending broadcast item to {num}: {e}")
+
+    # Jalankan antrean di background agar HTTP response langsung selesai tanpa memblokir client UI
+    asyncio.create_task(run_broadcast_worker(req.numbers, req.message, user["id"], req.session_id))
+    
+    return {
+        "ok": True,
+        "message": f"Broadcast process started in background for {len(req.numbers)} numbers."
+    }
 
 @api_router.get("/messages")
 async def list_messages(
@@ -845,10 +817,7 @@ async def list_rules(user=Depends(get_current_user)):
 
 @api_router.patch("/auto-replies/{rule_id}")
 async def update_rule(rule_id: str, req: AutoReplyRuleReq, user=Depends(get_current_user)):
-    res = await db.auto_replies.update_one(
-        {"id": rule_id, "user_id": user["id"]},
-        {"$set": req.model_dump()},
-    )
+    res = await db.auto_replies.update_one({"id": rule_id, "user_id": user["id"]}, {"$set": req.model_dump()})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Rule not found")
     doc = await db.auto_replies.find_one({"id": rule_id})
@@ -862,8 +831,6 @@ async def delete_rule(rule_id: str, user=Depends(get_current_user)):
     return {"ok": True}
 
 async def _match_and_reply(user_id: str, session_id: str, sender: str, text: str) -> Optional[Dict[str, Any]]:
-    """Find a matching auto-reply rule for the user/session/text and send the reply.
-    Returns the outbound message doc if a rule matched, else None."""
     rules = await db.auto_replies.find({
         "user_id": user_id,
         "active": True,
@@ -890,10 +857,8 @@ async def _match_and_reply(user_id: str, session_id: str, sender: str, text: str
     except HTTPException:
         return None
 
-
 @api_router.post("/auto-replies/simulate")
 async def simulate_incoming(req: SimulateInboundReq, user=Depends(get_current_user)):
-    """Helper to simulate an incoming message and trigger auto-reply rules."""
     session_id = req.session_id
     text = req.text.strip()
     sender = req.from_ or "62" + "".join(str(random.randint(0, 9)) for _ in range(10))
@@ -914,7 +879,6 @@ async def simulate_incoming(req: SimulateInboundReq, user=Depends(get_current_us
     }
     await db.messages.insert_one(inbound)
     reply_doc = await _match_and_reply(user["id"], session_id, sender, text)
-    # find matched rule for response (re-query for visibility)
     matched_rule = None
     if reply_doc:
         rules = await db.auto_replies.find({
@@ -931,7 +895,7 @@ async def simulate_incoming(req: SimulateInboundReq, user=Depends(get_current_us
                 break
     return {"inbound": clean_doc(inbound), "matched_rule": clean_doc(matched_rule), "reply": reply_doc}
 
-# ------------------ API Keys ------------------
+# ------------------ API Keys Management ------------------
 
 @api_router.post("/api-keys")
 async def create_api_key(req: ApiKeyCreateReq, user=Depends(get_current_user)):
@@ -948,7 +912,6 @@ async def create_api_key(req: ApiKeyCreateReq, user=Depends(get_current_user)):
         "last_used_at": None,
     }
     await db.api_keys.insert_one(doc)
-    # Return the FULL key once at creation. Subsequent listings only return masked form.
     out = clean_doc(dict(doc))
     out.pop("key_hash", None)
     out["key"] = key
@@ -963,34 +926,29 @@ async def list_api_keys(user=Depends(get_current_user)):
         prefix = d.get("key_prefix", "wag_")
         suffix = d.get("key_suffix", "")
         d["key_masked"] = f"{prefix}...{suffix}"
-        d.pop("key_hash", None)  # never expose the hash
+        d.pop("key_hash", None)
         items.append(d)
     return items
 
 @api_router.delete("/api-keys/{key_id}")
 async def revoke_api_key(key_id: str, user=Depends(get_current_user)):
-    res = await db.api_keys.update_one(
-        {"id": key_id, "user_id": user["id"]},
-        {"$set": {"revoked": True}},
-    )
+    res = await db.api_keys.update_one({"id": key_id, "user_id": user["id"]}, {"$set": {"revoked": True}})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Key not found")
     return {"ok": True}
 
-# ------------------ Public REST API (X-API-Key) ------------------
+# ------------------ Public REST API (Untuk Pihak Ketiga) ------------------
 
 @api_router.post("/v1/send")
 @limiter.limit("60/minute")
 async def public_send(request: Request, req: PublicSendReq, user=Depends(get_user_by_api_key)):
-    return await _process_send(user["id"], req.session_id, req.to, req.message, source="api")
+    cleaned_to = sanitize_phone_number(req.to)
+    return await _process_send(user["id"], req.session_id, cleaned_to, req.message, source="api")
 
 @api_router.get("/v1/sessions")
 async def public_sessions(user=Depends(get_user_by_api_key)):
     cursor = db.sessions.find({"user_id": user["id"]})
-    return [
-        {"id": d["id"], "name": d["name"], "status": d["status"], "phone_number": d.get("phone_number")}
-        async for d in cursor
-    ]
+    return [{"id": d["id"], "name": d["name"], "status": d["status"], "phone_number": d.get("phone_number")} async for d in cursor]
 
 # ------------------ Stats / Dashboard ------------------
 
@@ -1004,19 +962,13 @@ async def stats_overview(user=Depends(get_current_user)):
     failed_messages = await db.messages.count_documents({**user_q, "direction": "outbound", "status": "failed"})
 
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    today_messages = await db.messages.count_documents({
-        **user_q, "direction": "outbound", "created_at": {"$gte": today_start}
-    })
+    today_messages = await db.messages.count_documents({**user_q, "direction": "outbound", "created_at": {"$gte": today_start}})
 
-    # 7-day timeseries
     series = []
     for i in range(6, -1, -1):
         day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=i)
         next_day = day + timedelta(days=1)
-        count = await db.messages.count_documents({
-            **user_q, "direction": "outbound",
-            "created_at": {"$gte": day.isoformat(), "$lt": next_day.isoformat()},
-        })
+        count = await db.messages.count_documents({**user_q, "direction": "outbound", "created_at": {"$gte": day.isoformat(), "$lt": next_day.isoformat()}})
         series.append({"date": day.strftime("%b %d"), "count": count})
 
     success_rate = round((sent_messages / total_messages) * 100, 1) if total_messages else 100.0
@@ -1031,15 +983,10 @@ async def stats_overview(user=Depends(get_current_user)):
         "series": series,
     }
 
-# ------------------ Baileys webhook (inbound from Node service) ------------------
+# ------------------ Baileys Webhook Handler ------------------
 
 @api_router.post("/webhook/baileys")
 async def baileys_webhook(request: Request):
-    """Receives events pushed by the Baileys Node microservice:
-       - event=qr / connected / disconnected → update session status
-       - event=message → record inbound + trigger auto-reply
-    Auth: shared secret via X-Internal-Token header.
-    """
     if BAILEYS_TOKEN and request.headers.get("x-internal-token") != BAILEYS_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid internal token")
     payload = await request.json()
@@ -1053,7 +1000,6 @@ async def baileys_webhook(request: Request):
         return {"ok": True, "skip": "unknown session"}
 
     if event == "qr":
-        # Service usually returns the QR via /sessions/:id GET; we only mark status here.
         await db.sessions.update_one({"id": session_id}, {"$set": {"status": "qr"}})
     elif event == "connected":
         await db.sessions.update_one(
@@ -1066,10 +1012,7 @@ async def baileys_webhook(request: Request):
             }},
         )
     elif event == "disconnected":
-        await db.sessions.update_one(
-            {"id": session_id},
-            {"$set": {"status": payload.get("status", "disconnected"), "qr_data_url": None}},
-        )
+        await db.sessions.update_one({"id": session_id}, {"$set": {"status": payload.get("status", "disconnected"), "qr_data_url": None}})
     elif event == "message":
         text = payload.get("text") or ""
         sender = payload.get("from") or ""
@@ -1088,10 +1031,8 @@ async def baileys_webhook(request: Request):
             "provider_message_id": payload.get("message_id"),
             "created_at": now_iso(),
         })
-        # Auto-reply, fire-and-forget
         asyncio.create_task(_match_and_reply(sess["user_id"], session_id, sender, text))
     return {"ok": True}
-
 
 # ------------------ Health ------------------
 
