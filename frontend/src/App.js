@@ -31,8 +31,8 @@ export default function App() {
             <Route path="broadcast" element={<Broadcast />} />
             <Route path="auto-reply" element={<AutoReply />} />
             <Route path="history" element={<History />} />
-            <Route path="api-keys" element={<ApiKeys />} />
-            <Route path="api-docs" element={<ApiDocs />} />
+            <Route path="keys" element={<ApiKeys />} />
+            <Route path="docs" element={<ApiDocs />} />
             <Route path="settings" element={<Settings />} />
           </Route>
         </Routes>

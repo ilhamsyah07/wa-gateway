@@ -71,7 +71,7 @@ await axios.post("${API_URL}/v1/send", {
 
           <div className="bg-white border border-zinc-200 rounded-xl p-6">
             <div className="text-xs uppercase tracking-widest text-zinc-500 font-mono mb-2">Authentication</div>
-            <p className="text-sm text-zinc-600">Include the header <code className="font-mono bg-zinc-100 rounded px-1.5 py-0.5">X-API-Key: wag_...</code> with every request. Generate keys from the <a href="/api-keys" className="text-zinc-900 underline">API Keys</a> page.</p>
+            <p className="text-sm text-zinc-600">Include the header <code className="font-mono bg-zinc-100 rounded px-1.5 py-0.5">X-API-Key: wag_...</code> with every request. Generate keys from the <a href="/keys" className="text-zinc-900 underline">API Keys</a> page.</p>
           </div>
 
           <div className="bg-white border border-zinc-200 rounded-xl p-6">

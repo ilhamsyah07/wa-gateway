@@ -12,8 +12,8 @@ const nav = [
   { to: "/broadcast", label: "Broadcast", icon: Megaphone, id: "nav-broadcast" },
   { to: "/auto-reply", label: "Auto-Reply", icon: Bot, id: "nav-auto-reply" },
   { to: "/history", label: "History", icon: History, id: "nav-history" },
-  { to: "/api-keys", label: "API Keys", icon: KeyRound, id: "nav-api-keys" },
-  { to: "/api-docs", label: "API Docs", icon: BookText, id: "nav-api-docs" },
+  { to: "/keys", label: "API Keys", icon: KeyRound, id: "nav-api-keys" },
+  { to: "/docs", label: "API Docs", icon: BookText, id: "nav-api-docs" },
   { to: "/settings", label: "Settings", icon: Settings, id: "nav-settings" },
 ];
 

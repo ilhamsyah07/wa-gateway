@@ -74,7 +74,7 @@ export default function Dashboard() {
           <div className="mt-2 text-lg font-semibold">Add a new WhatsApp session</div>
           <div className="mt-1 text-sm text-zinc-500">Scan QR to connect another number.</div>
         </a>
-        <a href="/api-docs" data-testid="quick-api-docs" className="group bg-zinc-900 text-white rounded-xl p-6 hover:bg-zinc-800 transition-colors">
+        <a href="/docs" data-testid="quick-api-docs" className="group bg-zinc-900 text-white rounded-xl p-6 hover:bg-zinc-800 transition-colors">
           <div className="text-xs uppercase tracking-widest text-zinc-400 font-mono">Build it</div>
           <div className="mt-2 text-lg font-semibold">Integrate via REST API</div>
           <div className="mt-1 text-sm text-zinc-400">curl-friendly endpoints with API keys.</div>
