@@ -1,0 +1,63 @@
+{
+  "summary": "Iteration 8 — deploy-blocker (minimal requirements.txt) verified end-to-end. Backend restarted cleanly with the slimmed dependency set, all critical API endpoints respond 200, pip resolution in a fresh venv is conflict-free, server.py imports map 1:1 onto the new requirements, and the frontend smoke (login + sidebar) works.",
+  "static_check_requirements_txt": {
+    "present_required": ["fastapi", "uvicorn[standard]", "motor", "pydantic[email]", "python-dotenv", "bcrypt", "PyJWT", "qrcode[pil]", "Pillow", "httpx", "slowapi", "python-multipart"],
+    "missing_required": [],
+    "forbidden_present": [],
+    "uses_version_ranges": true,
+    "total_lines": 12,
+    "result": "PASS — exactly the 12 required packages, no emergentintegrations / litellm / boto3 / black / ruff / pytest / pyflakes"
+  },
+  "import_audit_server_py": {
+    "third_party_imports": ["dotenv", "fastapi", "fastapi.security", "starlette.middleware.cors", "motor.motor_asyncio", "pydantic", "slowapi", "slowapi.util", "slowapi.errors", "bcrypt", "jwt", "qrcode", "httpx"],
+    "all_resolvable_from_new_requirements": true,
+    "notes": "starlette ships with fastapi; jwt = PyJWT; dotenv = python-dotenv; Pillow is a transitive dep needed by qrcode[pil]; python-multipart is needed for fastapi UploadFile/File/Form which server.py imports. No orphan imports."
+  },
+  "pip_resolution_dry_run": {
+    "venv": "/tmp/venv_test (fresh python3.11)",
+    "command": "pip install --dry-run -r /app/backend/requirements.txt",
+    "result": "PASS — resolver picked motor 3.7.1 + pymongo 4.17.0 with no conflict, all 12 top-level + transitive deps resolved cleanly",
+    "resolved_versions": "fastapi-0.115.14, uvicorn-0.33.0, motor-3.7.1, pymongo-4.17.0, pydantic-2.13.4, python-dotenv-1.2.2, bcrypt-4.3.0, PyJWT-2.13.0, qrcode-8.2, pillow-11.3.0, httpx-0.28.1, slowapi-0.1.10, python-multipart-0.0.32, starlette-0.46.2"
+  },
+  "backend_runtime_verification": {
+    "supervisor_status": "backend RUNNING (uptime ~43s at test time — fresh restart with new requirements)",
+    "endpoints_tested": {
+      "GET /api/": "200 (service=wa-gateway, status=ok)",
+      "POST /api/auth/login (admin@wagateway.com/admin123)": "200 (JWT length 249)",
+      "GET /api/auth/me": "200",
+      "GET /api/sessions": "200",
+      "GET /api/api-keys": "200",
+      "GET /api/admin/users": "200",
+      "GET /api/admin/invitations": "200"
+    },
+    "result": "PASS — 7/7 endpoints respond 200"
+  },
+  "frontend_smoke": {
+    "login_page_renders": true,
+    "id_en_switcher_present": true,
+    "id_en_switcher_clickable": true,
+    "login_with_admin_succeeds": true,
+    "post_login_redirect": "https://wa-messenger-api.preview.emergentagent.com/ (dashboard)",
+    "sidebar_items_visible": ["Dashboard", "Sessions", "Send Message", "Broadcast", "Auto-Reply", "History", "User Approvals", "API Keys", "API Docs", "Settings"],
+    "console_errors": "Only pre-existing Recharts width(-1) warnings during initial render (not regression, not blocking)",
+    "result": "PASS"
+  },
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/test_iteration7_smoke.py"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "requirements.txt is well-commented, version-ranged (>=,<), and lean — good hygiene for the VPS docker build.",
+    "python-multipart and Pillow are correctly included as direct deps even though they are technically transitive (UploadFile/File/Form import + qrcode[pil]) — this makes the deps explicit and resolver-stable. Keep them.",
+    "server.py is now 1115 lines — approaching the 700-line guideline. Not blocking, but consider splitting routers (auth, sessions, messages, admin, public-api, webhook) into separate modules in a future iteration for maintainability.",
+    "No regressions introduced. The minimal requirements set is sufficient to run the entire app."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "admin@wagateway.com / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None — used existing admin user.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 8 only swapped /app/backend/requirements.txt to a 12-package minimal list (drops emergentintegrations + 50+ unused deps). Verified at runtime: supervisor restart healthy, all critical APIs 200, frontend login + sidebar work. Fresh-venv pip --dry-run resolves with no conflict. User's docker build on VPS should now succeed. No app code changed.",
+  "rca_of_the_issue": "Original requirements.txt was a `pip freeze` dump including emergentintegrations==0.2.0 (Emergent-internal-only PyPI package). On the user's VPS this broke `docker compose build` with `Could not find a version that satisfies the requirement emergentintegrations==0.2.0`. Fix: hand-curated minimal requirements.txt with version-range pins so motor/pymongo/pydantic stay compatible. Verified runtime + clean-venv resolution."
+}
